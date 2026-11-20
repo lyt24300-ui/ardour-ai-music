@@ -1,0 +1,669 @@
+"""Autonomous AI Music Producer Agent orchestrating Ardour MCP + DSP + Web Search."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import time
+import uuid
+from pathlib import Path
+from typing import Any, AsyncGenerator, Optional
+
+from json_repair import repair_json
+
+from .audio_analyzer import (
+    align_vocal_with_lyrics,
+    analyze_audio_file,
+    compare_mix_to_reference,
+)
+from .llm_client import stream_chat_completion
+from .mcp_client import ArdourMCPClient
+from .models import (
+    ChatMessage,
+    PlanStep,
+    PluginInstallCard,
+    ProviderConfig,
+    ToolCallTrace,
+)
+from .storage import StudioStorage
+from .web_search import fetch_webpage_text, web_search
+
+
+STUDIO_NATIVE_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_update_plan",
+            "description": "Update the visible step-by-step production plan checklist in the AI Music Studio UI.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "title": {"type": "string"},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "done", "skipped", "error"],
+                                },
+                                "detail": {"type": "string"},
+                            },
+                            "required": ["id", "title", "status"],
+                        },
+                    }
+                },
+                "required": ["steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_analyze_audio",
+            "description": "Run deep DSP audio analysis (BPM, Key, LUFS, True Peak, 7-band EQ, stereo, vocal VAD/phrases/breaths/pitch) on an uploaded asset ID or absolute file path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "Asset ID from References/Vocals/Samples/Attachments."},
+                    "file_path": {"type": "string", "description": "Absolute path to an audio file (if not using asset_id)."},
+                    "category": {"type": "string", "enum": ["references", "vocals", "samples"]},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_align_vocal_lyrics",
+            "description": "Align a vocal recording (asset_id) to the lines in the Lyrics tab using local faster-whisper word timestamps + VAD, returning exact [start_sec, end_sec] per lyric line for cutting/timing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vocal_asset_id": {"type": "string", "description": "Asset ID of the vocal audio file."},
+                    "language": {"type": "string", "description": "Optional ISO language code (e.g. 'ru', 'en'), empty for auto."},
+                },
+                "required": ["vocal_asset_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_compare_mix_to_reference",
+            "description": "Compare a bounced mix WAV file against a reference track (by reference asset_id) and get LUFS, spectral band deltas, stereo width comparison, and actionable mixing recommendations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mix_wav_path": {"type": "string", "description": "Absolute path to exported mix preview WAV."},
+                    "reference_asset_id": {"type": "string", "description": "Asset ID of the reference track."},
+                },
+                "required": ["mix_wav_path", "reference_asset_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_web_search",
+            "description": "Search the web for VST3/LV2/CLAP audio plugins, synths, drum machines, vocal chains, download links, and Windows installation instructions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 10},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_fetch_webpage",
+            "description": "Fetch and read clean text from a webpage URL (e.g., official VST3 plugin page or installation guide).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_request_plugin_install",
+            "description": "Present an interactive Plugin/Addon Installation Card to the user in chat explaining which VST3/CLAP/LV2 plugin to install, why it's needed, official download URL, Windows install folder, and step-by-step instructions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plugin_name": {"type": "string"},
+                    "format": {"type": "string", "description": "VST3, CLAP, LV2, or Addon"},
+                    "price_type": {"type": "string", "description": "Free, Freemium, or Paid"},
+                    "purpose": {"type": "string", "description": "Why this plugin helps achieve the user's target sound."},
+                    "download_url": {"type": "string"},
+                    "install_path_windows": {"type": "string"},
+                    "steps": {"type": "array", "items": {"type": "string"}},
+                    "alternatives": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["plugin_name", "purpose", "steps"],
+            },
+        },
+    },
+]
+
+
+def _sanitize_tool_name(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+
+
+def _safe_parse_args(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        try:
+            parsed = json.loads(repair_json(str(raw)))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+
+class AIProducerAgent:
+    """Orchestrates LLM reasoning, DSP tools, Web Search, and Ardour MCP calls."""
+
+    def __init__(self, storage: StudioStorage, mcp: ArdourMCPClient) -> None:
+        self.storage = storage
+        self.mcp = mcp
+        self._cancel_event = asyncio.Event()
+        self._running = False
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    def stop(self) -> None:
+        self._cancel_event.set()
+
+    def _build_system_prompt(self, mode: str, session_ctx: dict[str, Any]) -> str:
+        skills = [s for s in self.storage.list_skills() if s.enabled]
+        refs = self.storage.list_assets("references")
+        vocals = self.storage.list_assets("vocals")
+        samples = self.storage.list_assets("samples")
+        lyrics = self.storage.get_lyrics()
+
+        def compact_analysis(a: dict[str, Any]) -> dict[str, Any]:
+            # Strip dense waveform_peaks array so we don't waste LLM tokens
+            return {k: v for k, v in a.items() if k != "waveform_peaks"}
+
+        refs_block = [
+            {
+                "id": r.id,
+                "filename": r.filename,
+                "path": r.stored_path,
+                "role": r.role or "general_reference",
+                "notes": r.notes,
+                "dsp_analysis": compact_analysis(r.analysis),
+            }
+            for r in refs
+        ]
+        vocals_block = [
+            {
+                "id": v.id,
+                "filename": v.filename,
+                "path": v.stored_path,
+                "role": v.role or "lead_vocal",
+                "notes": v.notes,
+                "dsp_analysis": compact_analysis(v.analysis),
+                "lyrics_alignment": {
+                    "method": v.alignment.get("method"),
+                    "aligned_lines": v.alignment.get("aligned_lines", []),
+                }
+                if v.alignment
+                else None,
+            }
+            for v in vocals
+        ]
+        samples_block = [
+            {
+                "id": s.id,
+                "filename": s.filename,
+                "path": s.stored_path,
+                "role": s.role or "extra_sound",
+                "notes": s.notes,
+                "dsp_analysis": compact_analysis(s.analysis),
+            }
+            for s in samples
+        ]
+
+        skills_text = "\n\n".join(
+            f"### Skill: {s.name} ({s.category})\n{s.content}" for s in skills
+        ) or "(Нет активных скиллов)"
+
+        mode_instruction = (
+            "РЕЖИМ: ПОЛНЫЙ АВТОМАТ. Самостоятельно планируй и выполняй весь цикл производства песни "
+            "(анализ -> настройка сессии/темпа/маркеров -> аранжировка/MIDI/сэмплы -> импорт/нарезка/тайминг вокала -> "
+            "сведение/эффекты на треках и мастере -> контрольный экспорт и сравнение с референсом). "
+            "Останавливайся только если нужно попросить пользователя установить внешний плагин."
+            if mode == "autonomous"
+            else "РЕЖИМ: ПОШАГОВЫЙ КОНТРОЛЬ. Сначала обнови план через `studio_update_plan`, выполни анализ и "
+            "согласуй крупный этап с пользователем перед массовыми изменениями в сессии."
+        )
+
+        return f"""Ты — профессиональный AI-музыкальный продюсер, аранжировщик и звукорежиссёр, встроенный напрямую в DAW **Ardour** (AI Music Studio).
+Отвечай пользователю на языке его запроса (по умолчанию — на русском), чётко, по делу и дружелюбно.
+
+{mode_instruction}
+
+## Главные принципы работы
+1. **Полный контроль над движком Ardour:** все инструменты с префиксом `ardour__` напрямую управляют открытой сессией Ardour (треки, шины, мастер, импорт аудио, разрезка/перемещение/фейды регионов, MIDI JSON, автоматизация, плагины и их параметры, темп, маркеры, рендер, Lua-скрипты).
+2. **Не работай вслепую:** опирайся на DSP-паспорт референсов (BPM, тональность, LUFS, 7-полосный спектр, стереоширина) и таймкоды вокала (`studio_align_vocal_lyrics`).
+3. **План работы:** в начале сложной задачи всегда вызывай `studio_update_plan`, чтобы пользователь видел живой прогресс.
+4. **Плагины и Web Search:** сначала проверяй реально установленные плагины через `ardour__plugin_list_available`. Если не хватает важного инструмента/эффекта (например, качественного синта, автотюна, драм-машины или реверба), найди лучший актуальный вариант через `studio_web_search` и отправь карточку через `studio_request_plugin_install` с понятной инструкцией для Windows.
+5. **Безопасность:** если Ardour MCP не подключён (`connected: false`), честно сообщи об этом и предложи, что нужно сделать (открыть Ardour / включить MCPHttp), при этом всё равно можешь анализировать аудио, искать плагины и подготовить детальный план продакшна.
+
+## Активные Скиллы пользователя
+{skills_text}
+
+## Контекст проекта (из вкладок AI Music Studio)
+### Вкладка «Референсы (Примеры звучания)»
+```json
+{json.dumps(refs_block, ensure_ascii=False, indent=2)}
+```
+
+### Вкладка «Вокал (Голос пользователя)»
+```json
+{json.dumps(vocals_block, ensure_ascii=False, indent=2)}
+```
+
+### Вкладка «Дополнительные звуки / Сэмплы»
+```json
+{json.dumps(samples_block, ensure_ascii=False, indent=2)}
+```
+
+### Вкладка «Текст песни (Lyrics)»
+Название: {lyrics.title or "(без названия)"}
+Секции и текст:
+```
+{lyrics.raw_text or "(текст не добавлен)"}
+```
+
+## Живое состояние Ardour DAW
+```json
+{json.dumps(session_ctx, ensure_ascii=False, indent=2)}
+```
+"""
+
+    async def _collect_tools(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """Combine studio tools + dynamically discovered Ardour MCP tools."""
+        tools: list[dict[str, Any]] = list(STUDIO_NATIVE_TOOLS)
+        ardour_map: dict[str, str] = {}
+
+        try:
+            mcp_tools = await self.mcp.list_tools()
+            for t in mcp_tools:
+                orig_name = str(t.get("name", ""))
+                if not orig_name or orig_name == "hello_world":
+                    continue
+                fn_name = f"ardour__{_sanitize_tool_name(orig_name)}"
+                ardour_map[fn_name] = orig_name
+                schema = t.get("inputSchema") or {"type": "object", "properties": {}}
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": fn_name,
+                        "description": f"[Ardour DAW] {t.get('description') or t.get('title') or orig_name}",
+                        "parameters": schema,
+                    },
+                })
+        except Exception:
+            pass
+
+        return tools, ardour_map
+
+    async def _execute_tool(
+        self,
+        fn_name: str,
+        args: dict[str, Any],
+        ardour_map: dict[str, str],
+        plugin_cards_out: list[PluginInstallCard],
+        plan_out: list[PlanStep],
+        emit: Any,
+    ) -> tuple[bool, Any]:
+        settings = self.storage.get_settings()
+
+        if fn_name == "studio_update_plan":
+            raw_steps = args.get("steps") or []
+            steps = [PlanStep(**s) for s in raw_steps if isinstance(s, dict) and s.get("title")]
+            self.storage.save_plan(steps)
+            plan_out[:] = steps
+            await emit({"type": "plan", "steps": [s.model_dump() for s in steps]})
+            return True, {"updated": len(steps)}
+
+        if fn_name == "studio_analyze_audio":
+            asset_id = args.get("asset_id")
+            file_path = args.get("file_path")
+            category = args.get("category", "references")
+            asset = self.storage.get_asset(asset_id) if asset_id else None
+            if asset:
+                file_path = asset.stored_path
+                category = asset.category
+            if not file_path or not Path(file_path).exists():
+                return False, {"error": f"Audio file not found: {file_path}"}
+            analysis = await asyncio.to_thread(analyze_audio_file, file_path, category)
+            if asset:
+                asset.analysis = analysis
+                self.storage.update_asset(asset)
+                await emit({"type": "assets_updated"})
+            compact = {k: v for k, v in analysis.items() if k != "waveform_peaks"}
+            return True, compact
+
+        if fn_name == "studio_align_vocal_lyrics":
+            vocal_id = args.get("vocal_asset_id", "")
+            asset = self.storage.get_asset(vocal_id)
+            if not asset:
+                return False, {"error": f"Vocal asset '{vocal_id}' not found."}
+            lyrics = self.storage.get_lyrics()
+            vad_phrases = asset.analysis.get("vocal", {}).get("phrases") if asset.analysis else None
+            lang = args.get("language") or settings.whisper_language
+            alignment = await asyncio.to_thread(
+                align_vocal_with_lyrics,
+                asset.stored_path,
+                lyrics.sections,
+                vad_phrases,
+                settings.whisper_enabled,
+                settings.whisper_model,
+                lang,
+            )
+            asset.alignment = alignment
+            self.storage.update_asset(asset)
+            self.storage.save_lyrics(
+                lyrics.title,
+                lyrics.raw_text,
+                aligned_vocal_id=asset.id,
+                aligned_lines=alignment.get("aligned_lines", []),
+            )
+            await emit({"type": "lyrics_updated"})
+            return True, {
+                "method": alignment.get("method"),
+                "detected_language": alignment.get("detected_language"),
+                "word_count": alignment.get("word_count"),
+                "aligned_lines": alignment.get("aligned_lines", []),
+                "full_transcript": alignment.get("full_transcript", "")[:1200],
+            }
+
+        if fn_name == "studio_compare_mix_to_reference":
+            mix_path = args.get("mix_wav_path", "")
+            ref_id = args.get("reference_asset_id", "")
+            ref = self.storage.get_asset(ref_id)
+            if not ref:
+                return False, {"error": f"Reference asset '{ref_id}' not found."}
+            if not mix_path or not Path(mix_path).exists():
+                return False, {"error": f"Mix WAV not found: {mix_path}"}
+            report = await asyncio.to_thread(compare_mix_to_reference, mix_path, ref.stored_path)
+            return True, report
+
+        if fn_name == "studio_web_search":
+            res = await web_search(
+                str(args.get("query", "")),
+                settings.web_search,
+                max_results=args.get("max_results"),
+            )
+            return bool(res.get("ok")), res
+
+        if fn_name == "studio_fetch_webpage":
+            res = await fetch_webpage_text(str(args.get("url", "")))
+            return bool(res.get("ok")), res
+
+        if fn_name == "studio_request_plugin_install":
+            card = PluginInstallCard(
+                id=f"plug_{uuid.uuid4().hex[:8]}",
+                plugin_name=str(args.get("plugin_name", "Unknown Plugin")),
+                format=str(args.get("format", "VST3")),
+                price_type=str(args.get("price_type", "Free")),
+                purpose=str(args.get("purpose", "")),
+                download_url=str(args.get("download_url", "")),
+                install_path_windows=str(args.get("install_path_windows", r"C:\Program Files\Common Files\VST3")),
+                steps=[str(x) for x in (args.get("steps") or [])],
+                alternatives=[str(x) for x in (args.get("alternatives") or [])],
+                status="pending",
+            )
+            plugin_cards_out.append(card)
+            await emit({"type": "plugin_card", "card": card.model_dump()})
+            return True, {
+                "card_displayed": True,
+                "card_id": card.id,
+                "note": "Plugin install card shown to user. Pause here and let the user install & click Rescan, or ask if they prefer built-in plugins.",
+            }
+
+        if fn_name in ardour_map:
+            mcp_name = ardour_map[fn_name]
+            try:
+                res = await self.mcp.call_tool(mcp_name, args)
+                return True, res.get("structured", res)
+            except Exception as exc:
+                return False, {"error": str(exc)}
+
+        return False, {"error": f"Unknown tool: {fn_name}"}
+
+    async def run_chat_stream(
+        self,
+        user_message: str,
+        provider_id: Optional[str] = None,
+        attachment_ids: Optional[list[str]] = None,
+        mode_override: Optional[str] = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Execute a full agent turn, yielding real-time SSE event dicts."""
+        self._cancel_event.clear()
+        self._running = True
+        queue: asyncio.Queue[Optional[dict[str, Any]]] = asyncio.Queue()
+
+        async def emit(ev: dict[str, Any]) -> None:
+            await queue.put(ev)
+
+        async def worker() -> None:
+            try:
+                settings = self.storage.get_settings()
+                self.mcp.set_url(settings.ardour_mcp_url)
+                mode = mode_override or settings.autonomy_mode
+
+                provider: Optional[ProviderConfig] = self.storage.get_provider(provider_id)
+                if not provider:
+                    await emit({"type": "error", "message": "Не настроен ни один LLM-провайдер. Откройте вкладку «Провайдеры (API)»."})
+                    return
+                if not provider.api_key and "127.0.0.1" not in provider.base_url and "localhost" not in provider.base_url:
+                    await emit({"type": "error", "message": f"У провайдера «{provider.name}» не указан API Key. Задайте ключ во вкладке «Провайдеры (API)»."})
+                    return
+
+                # Gather attached files for this specific message
+                attached_meta: list[dict[str, Any]] = []
+                for aid in attachment_ids or []:
+                    asset = self.storage.get_asset(aid)
+                    if asset:
+                        attached_meta.append({
+                            "id": asset.id,
+                            "filename": asset.filename,
+                            "path": asset.stored_path,
+                            "category": asset.category,
+                        })
+
+                user_msg_obj = ChatMessage(
+                    id=f"msg_{uuid.uuid4().hex[:10]}",
+                    role="user",
+                    content=user_message,
+                    attachments=attached_meta,
+                )
+                self.storage.append_message(user_msg_obj)
+                await emit({"type": "user_saved", "message": user_msg_obj.model_dump()})
+
+                await emit({"type": "status", "text": "Подключаюсь к движку Ardour и собираю контекст..."})
+                session_ctx = await self.mcp.get_session_snapshot_context()
+                tools, ardour_map = await self._collect_tools()
+                system_prompt = self._build_system_prompt(mode, session_ctx)
+
+                # Build conversation history (last 18 messages for bounded context)
+                history = self.storage.get_chat_history()[-18:]
+                llm_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+                for m in history:
+                    text = m.content
+                    if m.attachments:
+                        att_str = ", ".join(f"{a['filename']} (id={a['id']}, path={a['path']})" for a in m.attachments)
+                        text += f"\n[Прикреплённые файлы: {att_str}]"
+                    llm_messages.append({"role": m.role, "content": text})
+
+                tool_traces: list[ToolCallTrace] = []
+                plugin_cards: list[PluginInstallCard] = []
+                current_plan: list[PlanStep] = self.storage.get_plan()
+                assistant_full_text_parts: list[str] = []
+                snapshot_taken: Optional[str] = None
+                mutating_done = False
+
+                for step_idx in range(settings.max_agent_steps):
+                    if self._cancel_event.is_set():
+                        await emit({"type": "status", "text": "Остановлено пользователем."})
+                        break
+
+                    await emit({"type": "status", "text": f"Думаю ({provider.model}) — шаг {step_idx + 1}..."})
+
+                    async def on_tok(tok: str) -> None:
+                        await emit({"type": "token", "text": tok})
+
+                    resp = await stream_chat_completion(
+                        provider=provider,
+                        messages=llm_messages,
+                        tools=tools,
+                        on_token=on_tok,
+                    )
+
+                    text_piece = resp.get("content", "")
+                    tool_calls = resp.get("tool_calls") or []
+                    if text_piece:
+                        assistant_full_text_parts.append(text_piece)
+
+                    if not tool_calls:
+                        break
+
+                    # Record assistant message with tool calls
+                    if resp.get("used_react_fallback"):
+                        llm_messages.append({"role": "assistant", "content": text_piece})
+                    else:
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": text_piece or None,
+                            "tool_calls": tool_calls,
+                        })
+
+                    paused_for_plugin = False
+
+                    for tc in tool_calls:
+                        if self._cancel_event.is_set():
+                            break
+                        tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                        fn = tc.get("function") or {}
+                        fn_name = str(fn.get("name", ""))
+                        fn_args = _safe_parse_args(fn.get("arguments"))
+
+                        # Auto-snapshot before first mutating Ardour call
+                        if (
+                            not mutating_done
+                            and settings.auto_snapshot
+                            and session_ctx.get("connected")
+                            and fn_name in ardour_map
+                            and not any(x in fn_name for x in ("get_", "_list", "list_"))
+                        ):
+                            mutating_done = True
+                            try:
+                                snap_name = f"AI_Before_{int(time.time())}"
+                                await self.mcp.call_tool("session_save", {"snapshotName": snap_name, "switchToSnapshot": False})
+                                snapshot_taken = snap_name
+                                await emit({"type": "snapshot", "name": snap_name})
+                            except Exception:
+                                pass
+
+                        await emit({
+                            "type": "tool_start",
+                            "id": tc_id,
+                            "tool_name": fn_name,
+                            "arguments": fn_args,
+                        })
+                        t0 = time.perf_counter()
+                        ok, result_obj = await self._execute_tool(
+                            fn_name, fn_args, ardour_map, plugin_cards, current_plan, emit
+                        )
+                        dur_ms = int((time.perf_counter() - t0) * 1000)
+
+                        result_json = json.dumps(result_obj, ensure_ascii=False)
+                        summary = result_json[:280] + ("…" if len(result_json) > 280 else "")
+                        trace = ToolCallTrace(
+                            id=tc_id,
+                            tool_name=fn_name,
+                            arguments=fn_args,
+                            result_summary=summary,
+                            ok=ok,
+                            duration_ms=dur_ms,
+                        )
+                        tool_traces.append(trace)
+                        await emit({"type": "tool_end", "trace": trace.model_dump()})
+
+                        # Feed tool result back to LLM (truncated safely at 14k chars)
+                        tool_payload = result_json[:14000]
+                        if resp.get("used_react_fallback"):
+                            llm_messages.append({
+                                "role": "user",
+                                "content": f"[TOOL RESULT: {fn_name}]\n```json\n{tool_payload}\n```",
+                            })
+                        else:
+                            llm_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": tool_payload,
+                            })
+
+                        if fn_name == "studio_request_plugin_install":
+                            paused_for_plugin = True
+
+                    if paused_for_plugin:
+                        # Give LLM one final summarizing turn explaining the plugin card, then wait for user
+                        continue
+
+                final_text = "\n\n".join(p.strip() for p in assistant_full_text_parts if p.strip())
+                if not final_text and tool_traces:
+                    final_text = f"Готово! Выполнено действий с движком: {len(tool_traces)}."
+
+                assistant_msg = ChatMessage(
+                    id=f"msg_{uuid.uuid4().hex[:10]}",
+                    role="assistant",
+                    content=final_text,
+                    tool_calls=tool_traces,
+                    plugin_cards=plugin_cards,
+                    plan_snapshot=current_plan,
+                    snapshot_name=snapshot_taken,
+                )
+                self.storage.append_message(assistant_msg)
+                await emit({"type": "done", "message": assistant_msg.model_dump()})
+            except Exception as exc:
+                await emit({"type": "error", "message": str(exc)})
+            finally:
+                self._running = False
+                await queue.put(None)
+
+        task = asyncio.create_task(worker())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+        finally:
+            if not task.done():
+                self._cancel_event.set()
+                task.cancel()

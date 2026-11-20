@@ -1,0 +1,169 @@
+name: Build Ardour AI Music (Windows x64)
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout repository with full git history & tags (for git describe)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure a version tag exists (repo pushed without upstream tags)
+        shell: bash
+        run: |
+          git describe HEAD >/dev/null 2>&1 || git tag 9.10
+
+      - name: Setup MSYS2 MINGW64 + Ardour Build Dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          pacboy: >-
+            toolchain:p
+            pkgconf:p
+            python:p
+            dlfcn:p
+            boost:p
+            glib2:p
+            glibmm:p
+            libsigc++:p
+            cairo:p
+            cairomm:p
+            pango:p
+            pangomm:p
+            gdk-pixbuf2:p
+            libpng:p
+            fontconfig:p
+            freetype:p
+            libxml2:p
+            libsndfile:p
+            libsamplerate:p
+            curl:p
+            libarchive:p
+            liblo:p
+            taglib:p
+            vamp-plugin-sdk:p
+            rubberband:p
+            fftw:p
+            lv2:p
+            serd:p
+            sord:p
+            sratom:p
+            lilv:p
+            aubio:p
+            libogg:p
+            flac:p
+            portaudio:p
+            libwebsockets:p
+            openssl:p
+            libusb:p
+            gettext-tools:p
+
+      - name: Configure Ardour with Waf (MinGW64 + PortAudio + MCP HTTP)
+        run: |
+          set -e
+          export PKG_CONFIG_PATH="/mingw64/lib/pkgconfig:/mingw64/share/pkgconfig"
+          python3 waf configure \
+            --dist-target=mingw \
+            --with-backends=portaudio,dummy \
+            --no-lrdf \
+            --optimize \
+            --prefix="$PWD/dist_install"
+
+      - name: Build Ardour + AI Music Tab + Extended MCP HTTP
+        run: |
+          set -e
+          export PKG_CONFIG_PATH="/mingw64/lib/pkgconfig:/mingw64/share/pkgconfig"
+          python3 waf build -j$(nproc)
+
+      - name: Install into staging folder
+        run: |
+          set -e
+          python3 waf install
+
+      - name: Bundle runtime DLLs and AI Music Studio into portable package
+        run: |
+          set -e
+          STAGE="$PWD/ardour-ai-music-win64"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp -r "$PWD/dist_install/"* "$STAGE/"
+
+          # Verify Ardour executable and MCP HTTP control surface exist
+          echo "=== Verifying built binaries ==="
+          find "$STAGE" -maxdepth 4 \( -name "ardour*.exe" -o -name "*mcp_http*.dll" \) -print
+
+          # Copy required MinGW64 runtime DLLs recursively via ldd
+          BIN_DIR="$STAGE/bin"
+          mkdir -p "$BIN_DIR"
+          collect_dlls() {
+            find "$STAGE" \( -name "*.exe" -o -name "*.dll" \) -print0 | \
+              xargs -0 ldd 2>/dev/null | \
+              awk '/=> \/mingw64\/bin\// {print $3}' | \
+              sort -u
+          }
+          for pass in 1 2 3; do
+            for dll in $(collect_dlls); do
+              base=$(basename "$dll")
+              if [ ! -f "$BIN_DIR/$base" ]; then
+                cp "$dll" "$BIN_DIR/"
+              fi
+            done
+          done
+
+          # Copy GTK/GDK-Pixbuf loaders & GLib schemas if present
+          mkdir -p "$STAGE/lib/gdk-pixbuf-2.0" "$STAGE/share/glib-2.0/schemas"
+          cp -r /mingw64/lib/gdk-pixbuf-2.0/* "$STAGE/lib/gdk-pixbuf-2.0/" 2>/dev/null || true
+          cp -r /mingw64/share/glib-2.0/schemas/* "$STAGE/share/glib-2.0/schemas/" 2>/dev/null || true
+
+          # Include AI Music Studio companion app next to Ardour
+          if [ -d "$PWD/ai_music_studio" ]; then
+            cp -r "$PWD/ai_music_studio" "$STAGE/ai_music_studio"
+            rm -rf "$STAGE/ai_music_studio/data" "$STAGE/ai_music_studio/__pycache__"
+          fi
+
+          # Create 1-click Windows launchers
+          cat > "$STAGE/Launch_Ardour_AI_Music.bat" << 'EOF'
+          @echo off
+          setlocal
+          set "ROOT=%~dp0"
+          set "PATH=%ROOT%bin;%ROOT%lib\ardour9;%PATH%"
+          set "AI_MUSIC_STUDIO_DIR=%ROOT%ai_music_studio"
+          for %%F in ("%ROOT%bin\ardour*.exe") do (
+            start "" "%%~fF" %*
+            exit /b 0
+          )
+          echo Ardour executable not found in %ROOT%bin
+          pause
+          EOF
+
+          cat > "$STAGE/Launch_AI_Music_Studio_Only.bat" << 'EOF'
+          @echo off
+          cd /d "%~dp0"
+          set "PYTHONPATH=%~dp0"
+          python -m ai_music_studio.launcher %*
+          EOF
+
+      - name: Create portable ZIP archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "ardour-ai-music-win64\*" -DestinationPath "ardour-ai-music-win64.zip" -CompressionLevel Optimal
+          Get-Item "ardour-ai-music-win64.zip" | Select-Object Name, @{N='SizeMB';E={[math]::Round($_.Length/1MB,2)}}
+
+      - name: Upload portable Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-ai-music-win64
+          path: ardour-ai-music-win64.zip
+          retention-days: 30

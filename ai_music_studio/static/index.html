@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ardour — AI Music Studio</title>
+  <link rel="stylesheet" href="/static/ardour_theme.css" />
+</head>
+<body>
+<div class="app-shell">
+  <!-- Top Ardour-Style Transport & Control Strip -->
+  <header class="top-bar">
+    <div class="top-left">
+      <div class="brand-badge">
+        <span class="tag">AI</span>
+        <span>Ardour AI Music Studio</span>
+      </div>
+      <div id="ardourLcd" class="lcd-box disconnected" title="Статус подключения к встроенному MCP HTTP серверу Ardour">
+        <span id="ardourLed" class="led orange"></span>
+        <span id="ardourLcdText">MCP: проверка...</span>
+      </div>
+      <button id="btnRefreshArdour" class="ardour-btn sm" title="Переподключиться к Ardour MCP">Обновить</button>
+    </div>
+
+    <div class="top-center">
+      <select id="providerSelect" class="ardour-select" title="Активный OpenAI-compatible провайдер"></select>
+      <select id="modeSelect" class="ardour-select" title="Режим работы ИИ">
+        <option value="autonomous">Режим: Автомат</option>
+        <option value="step_by_step">Режим: Пошагово</option>
+      </select>
+    </div>
+
+    <div class="top-right">
+      <select id="themeSelect" class="ardour-select" title="Тема интерфейса (синхронизирована с темами Ardour)"></select>
+      <button id="btnUndo" class="ardour-btn sm" title="Откатить последнее действие в Ardour (Undo)">↶ Откат ИИ</button>
+      <button id="btnClearChat" class="ardour-btn sm danger" title="Очистить историю чата">Очистить</button>
+    </div>
+  </header>
+
+  <!-- Main Two-Pane Studio Workspace -->
+  <div class="workspace">
+    <!-- Left Context Pane: 6 Dedicated Studio Tabs -->
+    <aside id="leftPane" class="left-pane">
+      <nav class="context-tabs" role="tablist">
+        <button class="page-tab-btn active" data-tab="references">
+          <span>Референсы</span><span class="tab-count" id="cnt-references">0</span>
+        </button>
+        <button class="page-tab-btn" data-tab="vocals">
+          <span>Вокал</span><span class="tab-count" id="cnt-vocals">0</span>
+        </button>
+        <button class="page-tab-btn" data-tab="samples">
+          <span>Звуки</span><span class="tab-count" id="cnt-samples">0</span>
+        </button>
+        <button class="page-tab-btn" data-tab="lyrics">
+          <span>Текст песни</span><span class="tab-count" id="cnt-lyrics">0</span>
+        </button>
+        <button class="page-tab-btn" data-tab="skills">
+          <span>Скиллы</span><span class="tab-count" id="cnt-skills">0</span>
+        </button>
+        <button class="page-tab-btn" data-tab="providers">
+          <span>Провайдеры</span><span class="tab-count" id="cnt-providers">0</span>
+        </button>
+      </nav>
+
+      <div class="tab-body">
+        <!-- TAB 1: REFERENCES -->
+        <section id="tab-references" class="tab-panel active">
+          <div class="section-bar">
+            <span>Примеры музыки (чтобы ИИ понял нужное звучание)</span>
+          </div>
+          <div class="drop-zone" data-category="references">
+            <div class="dz-title">+ Перетащите аудио-референсы или нажмите для выбора</div>
+            <div class="dz-sub">WAV, MP3, FLAC, OGG, M4A — автоанализ BPM, Key, LUFS, спектра и стерео</div>
+            <input type="file" accept="audio/*" multiple hidden />
+          </div>
+          <div id="list-references" class="asset-list"></div>
+        </section>
+
+        <!-- TAB 2: VOCALS -->
+        <section id="tab-vocals" class="tab-panel">
+          <div class="section-bar">
+            <span>Дорожки голоса / вокала</span>
+          </div>
+          <div class="drop-zone" data-category="vocals">
+            <div class="dz-title">+ Добавьте аудиозаписи с голосом (лид, даблы, бэки)</div>
+            <div class="dz-sub">Автопоиск фраз, тишины, вздохов, регистра и синхронизация с текстом (Whisper)</div>
+            <input type="file" accept="audio/*" multiple hidden />
+          </div>
+          <div id="list-vocals" class="asset-list"></div>
+        </section>
+
+        <!-- TAB 3: SAMPLES / EXTRA SOUNDS -->
+        <section id="tab-samples" class="tab-panel">
+          <div class="section-bar">
+            <span>Дополнительные звуки, сэмплы и лупы для трека</span>
+          </div>
+          <div class="drop-zone" data-category="samples">
+            <div class="dz-title">+ Добавьте ваншоты, лупы, FX и звуки для аранжировки</div>
+            <div class="dz-sub">Укажите в заметке, куда и как нейросеть должна их встроить</div>
+            <input type="file" accept="audio/*" multiple hidden />
+          </div>
+          <div id="list-samples" class="asset-list"></div>
+        </section>
+
+        <!-- TAB 4: LYRICS -->
+        <section id="tab-lyrics" class="tab-panel">
+          <div class="section-bar">
+            <span>Полный текст песни и разметка секций</span>
+            <button id="btnSaveLyrics" class="ardour-btn sm green">Сохранить</button>
+          </div>
+          <div class="field">
+            <label for="lyricsTitle">Название трека</label>
+            <input id="lyricsTitle" class="ardour-input" placeholder="Например: Ночной город" />
+          </div>
+          <div class="lyrics-tags">
+            <button class="ardour-btn sm" data-lyric-tag="[Intro]">+ [Intro]</button>
+            <button class="ardour-btn sm" data-lyric-tag="[Verse 1]">+ [Verse]</button>
+            <button class="ardour-btn sm" data-lyric-tag="[Pre-Chorus]">+ [Pre-Chorus]</button>
+            <button class="ardour-btn sm" data-lyric-tag="[Chorus]">+ [Chorus]</button>
+            <button class="ardour-btn sm" data-lyric-tag="[Bridge]">+ [Bridge]</button>
+            <button class="ardour-btn sm" data-lyric-tag="[Outro]">+ [Outro]</button>
+          </div>
+          <textarea id="lyricsText" class="ardour-textarea lyrics-editor" placeholder="[Verse 1]&#10;Вставьте полный текст вашей песни здесь...&#10;&#10;[Chorus]&#10;..."></textarea>
+          <div class="section-bar">
+            <span>Привязка строк к таймкодам вокала</span>
+            <span id="lyricsAlignInfo" class="chip neutral">Не синхронизировано</span>
+          </div>
+          <div id="lyricsAlignedWrap"></div>
+        </section>
+
+        <!-- TAB 5: SKILLS -->
+        <section id="tab-skills" class="tab-panel">
+          <div class="section-bar">
+            <span>Скиллы (правила и пресеты работы ИИ)</span>
+            <div style="display:flex;gap:4px;">
+              <button id="btnImportSkillMd" class="ardour-btn sm">Импорт .md</button>
+              <button id="btnNewSkill" class="ardour-btn sm primary">+ Новый скилл</button>
+              <input id="skillFileInput" type="file" accept=".md,.txt" hidden />
+            </div>
+          </div>
+          <div id="skillEditorBox" class="form-box" style="display:none;">
+            <input type="hidden" id="skId" />
+            <div class="field-grid">
+              <div class="field">
+                <label>Название скилла</label>
+                <input id="skName" class="ardour-input" placeholder="Сведение хип-хоп вокала" />
+              </div>
+              <div class="field">
+                <label>Категория</label>
+                <select id="skCategory" class="ardour-select">
+                  <option value="vocal">vocal</option>
+                  <option value="mixing">mixing</option>
+                  <option value="arrangement">arrangement</option>
+                  <option value="plugins">plugins</option>
+                  <option value="general">general</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label>Краткое описание</label>
+              <input id="skDesc" class="ardour-input" placeholder="Для чего нужен этот скилл" />
+            </div>
+            <div class="field">
+              <label>Инструкция для ИИ (Markdown)</label>
+              <textarea id="skContent" class="ardour-textarea" rows="7" placeholder="Опишите пошаговые правила сведения, эффекты, стиль..."></textarea>
+            </div>
+            <div style="display:flex;gap:6px;justify-content:flex-end;">
+              <button id="btnCancelSkill" class="ardour-btn sm">Отмена</button>
+              <button id="btnSaveSkill" class="ardour-btn sm green">Сохранить скилл</button>
+            </div>
+          </div>
+          <div id="list-skills" class="asset-list"></div>
+        </section>
+
+        <!-- TAB 6: PROVIDERS (OpenAI-Compatible) + WEB SEARCH + ENGINE SETTINGS -->
+        <section id="tab-providers" class="tab-panel">
+          <div class="section-bar">
+            <span>OpenAI-Compatible провайдеры LLM</span>
+            <button id="btnNewProvider" class="ardour-btn sm primary">+ Добавить</button>
+          </div>
+          <div id="providerFormBox" class="form-box" style="display:none;">
+            <input type="hidden" id="prId" />
+            <div class="field-grid">
+              <div class="field">
+                <label>Название</label>
+                <input id="prName" class="ardour-input" placeholder="Мой OpenAI / DeepSeek / Ollama" />
+              </div>
+              <div class="field">
+                <label>Base URL (OpenAI-compatible)</label>
+                <input id="prBaseUrl" class="ardour-input" placeholder="https://api.openai.com/v1" />
+              </div>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <label>API Key</label>
+                <input id="prApiKey" type="password" class="ardour-input" placeholder="sk-... (для Ollama можно любой)" />
+              </div>
+              <div class="field">
+                <label>Модель</label>
+                <div style="display:flex;gap:4px;">
+                  <input id="prModel" class="ardour-input" style="flex:1;" list="prModelList" placeholder="gpt-4o / deepseek-chat / qwen2.5" />
+                  <datalist id="prModelList"></datalist>
+                  <button id="btnFetchModels" class="ardour-btn sm" title="Загрузить список моделей из /models">Модели</button>
+                </div>
+              </div>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <label>Temperature</label>
+                <input id="prTemp" type="number" step="0.1" min="0" max="2" value="0.4" class="ardour-input" />
+              </div>
+              <div class="field">
+                <label>Max Tokens</label>
+                <input id="prMaxTokens" type="number" step="256" min="256" max="128000" value="4096" class="ardour-input" />
+              </div>
+            </div>
+            <div class="check-row">
+              <label><input id="prSupportsTools" type="checkbox" checked /> Нативный Tool Calling (если выкл — JSON fallback)</label>
+              <label><input id="prDefault" type="checkbox" /> По умолчанию</label>
+            </div>
+            <div id="prTestResult" class="card-desc"></div>
+            <div style="display:flex;gap:6px;justify-content:flex-end;">
+              <button id="btnTestProvider" class="ardour-btn sm">Проверить</button>
+              <button id="btnCancelProvider" class="ardour-btn sm">Отмена</button>
+              <button id="btnSaveProvider" class="ardour-btn sm green">Сохранить</button>
+            </div>
+          </div>
+          <div id="list-providers" class="asset-list"></div>
+
+          <!-- Web Search & Studio Engine Settings -->
+          <div class="section-bar" style="margin-top:6px;">
+            <span>Web Search, Whisper и подключение к Ardour</span>
+            <button id="btnSaveSettings" class="ardour-btn sm green">Сохранить</button>
+          </div>
+          <div class="form-box">
+            <div class="field-grid">
+              <div class="field">
+                <label>Ardour MCP URL</label>
+                <input id="setMcpUrl" class="ardour-input" value="http://127.0.0.1:4820/mcp" />
+              </div>
+              <div class="field">
+                <label>Макс. шагов агента</label>
+                <input id="setMaxSteps" type="number" min="3" max="100" value="35" class="ardour-input" />
+              </div>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <label>Провайдер Web Search</label>
+                <select id="setSearchProvider" class="ardour-select">
+                  <option value="duckduckgo">DuckDuckGo (бесплатно, без ключа)</option>
+                  <option value="tavily">Tavily API</option>
+                  <option value="brave">Brave Search API</option>
+                  <option value="serper">Serper (Google)</option>
+                  <option value="searxng">SearXNG (свой сервер)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>API Key / URL для поиска (если нужен)</label>
+                <input id="setSearchKey" class="ardour-input" placeholder="Ключ или URL SearXNG" />
+              </div>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <label>Модель Whisper (выравнивание вокала)</label>
+                <select id="setWhisperModel" class="ardour-select">
+                  <option value="tiny">tiny (~75 МБ, самый быстрый)</option>
+                  <option value="base">base (~145 МБ, оптимально)</option>
+                  <option value="small">small (~465 МБ, точнее для RU)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Язык вокала (пусто = авто)</label>
+                <input id="setWhisperLang" class="ardour-input" placeholder="ru / en / пусто" />
+              </div>
+            </div>
+            <div class="check-row">
+              <label><input id="setSearchEnabled" type="checkbox" checked /> Web Search включён</label>
+              <label><input id="setWhisperEnabled" type="checkbox" checked /> Whisper синхронизация</label>
+              <label><input id="setAutoSnapshot" type="checkbox" checked /> Авто-снапшот перед правками</label>
+            </div>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <div id="paneSplitter" class="pane-splitter" title="Изменить ширину панели"></div>
+
+    <!-- Right Main Pane: AI Music Producer Chat -->
+    <main class="chat-pane">
+      <div id="planBar" class="plan-bar" style="display:none;">
+        <div class="plan-header" id="planToggle">
+          <span>План продакшна ИИ</span>
+          <span id="planProgressText" class="chip">0/0</span>
+        </div>
+        <div id="planSteps" class="plan-steps"></div>
+      </div>
+
+      <div id="chatFeed" class="chat-feed"></div>
+
+      <div class="composer-wrap">
+        <div class="composer-status-row">
+          <div id="ctxPills" class="ctx-pills"></div>
+          <div id="agentStatusText" class="chip neutral">Готов к работе</div>
+        </div>
+        <div id="pendingAttachments" class="ctx-pills" style="display:none;"></div>
+        <div class="composer-input-row">
+          <button id="btnAttachChat" class="ardour-btn" title="Прикрепить любой файл к сообщению">+ Файл</button>
+          <input id="chatFileInput" type="file" multiple hidden />
+          <textarea id="chatInput" class="ardour-textarea" placeholder="Опишите желаемый трек, настроение, стиль сведения или дайте команду (Enter — отправить, Shift+Enter — новая строка)..."></textarea>
+          <div class="composer-btns">
+            <button id="btnSend" class="ardour-btn green">Отправить</button>
+            <button id="btnStop" class="ardour-btn danger" style="display:none;">Стоп</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<audio id="globalAudioPlayer" hidden></audio>
+<div id="toast" class="status-toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

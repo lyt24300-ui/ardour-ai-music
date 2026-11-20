@@ -1,0 +1,947 @@
+/* ==========================================================================
+ * Ardour AI Music Studio — Native Ardour Clearlooks / Cairo Theme Stylesheet
+ *
+ * Palette tokens are populated live from ardour/gtk2_ardour/themes/*.colors
+ * (defaults match dark-ardour.colors verbatim).
+ * Geometry matches libs/widgets/ardour_button.cc (3.5px radius, 1px black
+ * border, convex bevel, circular LED indicators) and clearlooks.rc.in
+ * (10px flat scrollbars, 4px pane handles, 1px depressed click offset).
+ * ========================================================================== */
+
+:root {
+  --ardour-bg: #3d3d3d;
+  --ardour-bg-panel: #373737;
+  --ardour-bg-dark: #101010;
+  --ardour-bg-track: #202020;
+  --ardour-bg-elevated: #555555;
+  --ardour-border: #000000;
+  --ardour-border-soft: #252525;
+  --ardour-fg: #e5e5e5;
+  --ardour-fg-secondary: #cccccc;
+  --ardour-fg-muted: #7f7f7f;
+  --ardour-fg-bright: #ffffff;
+  --ardour-btn-bg: #4f4d4d;
+  --ardour-btn-top: #5d5b5b;
+  --ardour-btn-bot: #434141;
+  --ardour-btn-hover: #615f5f;
+  --ardour-page-active: #3dcc4c;
+  --ardour-page-active-fg: #101010;
+  --ardour-selection: #5da3c1;
+  --ardour-clock-bg: #101010;
+  --ardour-clock-fg: #78cd2f;
+  --ardour-widget-blue: #526d94;
+  --ardour-widget-blue-dark: #20242a;
+  --ardour-widget-blue-light: #628db4;
+  --ardour-widget-green: #617552;
+  --ardour-widget-green-dark: #3c403a;
+  --ardour-widget-orange: #904010;
+  --ardour-widget-ruddy: #7c3a3a;
+  --ardour-alert-green: #3dcc4c;
+  --ardour-alert-orange: #e58b05;
+  --ardour-alert-red: #f10000;
+  --ardour-alert-yellow: #e0e000;
+  --ardour-alert-cyan: #20b2b2;
+  --ardour-contrasting-alt: #cca336;
+  --ardour-meter-0: #008800;
+  --ardour-meter-2: #00ff00;
+  --ardour-meter-4: #fff000;
+  --ardour-meter-6: #ff8800;
+  --ardour-meter-8: #ff0000;
+
+  --font-ui: "Segoe UI", "DejaVu Sans", "Liberation Sans", sans-serif;
+  --font-mono: "Consolas", "DejaVu Sans Mono", "Liberation Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--ardour-bg);
+  color: var(--ardour-fg);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* Ardour 10px flat scrollbars (clearlooks.rc.in: slider-width = 10) */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--ardour-bg-dark);
+  border-left: 1px solid var(--ardour-border);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ardour-fg-muted);
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ardour-fg-secondary);
+}
+
+/* ---------- Signature ArdourButton Widget ---------- */
+.ardour-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  background: linear-gradient(to bottom, var(--ardour-btn-top), var(--ardour-btn-bot));
+  color: var(--ardour-fg);
+  border: 1px solid var(--ardour-border);
+  border-radius: 3.5px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.ardour-btn:hover:not(:disabled) {
+  background: linear-gradient(to bottom, var(--ardour-btn-hover), var(--ardour-btn-bg));
+  color: var(--ardour-fg-bright);
+}
+.ardour-btn:active:not(:disabled) {
+  background: var(--ardour-btn-bot);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.55);
+  transform: translate(1px, 1px);
+}
+.ardour-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+.ardour-btn.sm {
+  height: 22px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+.ardour-btn.primary {
+  background: linear-gradient(to bottom, var(--ardour-widget-blue-light), var(--ardour-widget-blue));
+  color: #ffffff;
+}
+.ardour-btn.primary:hover:not(:disabled) {
+  filter: brightness(1.09);
+}
+.ardour-btn.green {
+  background: linear-gradient(to bottom, var(--ardour-page-active), var(--ardour-widget-green));
+  color: var(--ardour-page-active-fg);
+  font-weight: 600;
+}
+.ardour-btn.danger {
+  background: linear-gradient(to bottom, var(--ardour-widget-ruddy), #5e2929);
+  color: #ffffff;
+}
+.ardour-btn.amber {
+  background: linear-gradient(to bottom, var(--ardour-alert-orange), var(--ardour-widget-orange));
+  color: #101010;
+  font-weight: 600;
+}
+
+/* Ardour circular inset LED indicator */
+.led {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--ardour-border);
+  background: #2b2b2b;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.7);
+  flex-shrink: 0;
+}
+.led.green {
+  background: var(--ardour-alert-green);
+  box-shadow: 0 0 4px rgba(61, 204, 76, 0.6);
+}
+.led.orange {
+  background: var(--ardour-alert-orange);
+  box-shadow: 0 0 4px rgba(229, 139, 5, 0.55);
+}
+.led.red {
+  background: var(--ardour-alert-red);
+  box-shadow: 0 0 4px rgba(241, 0, 0, 0.65);
+}
+.led.cyan {
+  background: var(--ardour-selection);
+}
+
+/* Ardour Inputs / Selects / Textareas */
+.ardour-input,
+.ardour-select,
+.ardour-textarea {
+  background: var(--ardour-bg-dark);
+  color: var(--ardour-fg);
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+  padding: 5px 8px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  outline: none;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+.ardour-input:focus,
+.ardour-select:focus,
+.ardour-textarea:focus {
+  border-color: var(--ardour-selection);
+}
+.ardour-select {
+  height: 26px;
+  padding: 0 6px;
+  cursor: pointer;
+}
+.ardour-textarea {
+  resize: vertical;
+  user-select: text;
+}
+
+/* ---------- Main Application Shell ---------- */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100vh;
+  background: var(--ardour-bg);
+}
+
+/* Top Ardour Transport / Toolbar Strip */
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 44px;
+  padding: 4px 8px;
+  background: var(--ardour-bg-panel);
+  border-bottom: 1px solid var(--ardour-border);
+  flex-shrink: 0;
+}
+.top-left,
+.top-center,
+.top-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.brand-badge {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 9px;
+  background: var(--ardour-bg-dark);
+  border: 1px solid var(--ardour-border);
+  border-radius: 3px;
+  font-weight: 700;
+  font-size: 12.5px;
+  letter-spacing: 0.3px;
+  color: var(--ardour-fg-bright);
+}
+.brand-badge .tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: var(--ardour-page-active);
+  color: var(--ardour-page-active-fg);
+}
+
+/* Ardour Digital LCD Clock Box (dark-ardour.colors: clock:background / clock:text) */
+.lcd-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 10px;
+  background: var(--ardour-clock-bg);
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ardour-clock-fg);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+.lcd-box.disconnected {
+  color: var(--ardour-alert-orange);
+}
+.lcd-sep {
+  color: var(--ardour-fg-muted);
+}
+
+/* ---------- Workspace Split (GtkPaned style) ---------- */
+.workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  background: var(--ardour-bg);
+}
+
+.left-pane {
+  width: 470px;
+  min-width: 340px;
+  max-width: 660px;
+  display: flex;
+  flex-direction: column;
+  background: var(--ardour-bg-panel);
+  border-right: 1px solid var(--ardour-border);
+  min-height: 0;
+}
+
+.pane-splitter {
+  width: 4px;
+  background: var(--ardour-bg);
+  border-right: 1px solid var(--ardour-border);
+  cursor: col-resize;
+  flex-shrink: 0;
+}
+.pane-splitter:hover {
+  background: var(--ardour-selection);
+}
+
+/* Ardour Page Switch Tab Strip (Rec / Cue / Edit / Mix style) */
+.context-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  padding: 5px;
+  background: var(--ardour-bg);
+  border-bottom: 1px solid var(--ardour-border);
+}
+.page-tab-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  background: linear-gradient(to bottom, var(--ardour-btn-top), var(--ardour-btn-bot));
+  color: var(--ardour-fg);
+  border: 1px solid var(--ardour-border);
+  border-radius: 3.5px;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.page-tab-btn:hover {
+  background: linear-gradient(to bottom, var(--ardour-btn-hover), var(--ardour-btn-bg));
+}
+.page-tab-btn.active {
+  background: var(--ardour-page-active);
+  color: var(--ardour-page-active-fg);
+  font-weight: 700;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.tab-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.35);
+  color: inherit;
+}
+
+.tab-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  min-height: 0;
+}
+.tab-panel {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+}
+.tab-panel.active {
+  display: flex;
+}
+.asset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+/* ---------- Drop Zone & Asset Cards (Audio Track Strip look) ---------- */
+.drop-zone {
+  border: 1px dashed var(--ardour-fg-muted);
+  background: var(--ardour-bg-track);
+  border-radius: 3px;
+  padding: 12px 10px;
+  text-align: center;
+  cursor: pointer;
+  color: var(--ardour-fg-secondary);
+}
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--ardour-alert-green);
+  background: #252b25;
+  color: var(--ardour-fg-bright);
+}
+.drop-zone .dz-title {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+.drop-zone .dz-sub {
+  font-size: 11px;
+  color: var(--ardour-fg-muted);
+}
+
+.section-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px;
+  background: var(--ardour-bg);
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ardour-fg-secondary);
+}
+
+.asset-card {
+  background: var(--ardour-bg-track);
+  border: 1px solid var(--ardour-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.asset-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 7px;
+  background: var(--ardour-widget-blue-dark);
+  border-bottom: 1px solid var(--ardour-border);
+}
+.asset-card.vocal .asset-header {
+  background: var(--ardour-widget-green-dark);
+}
+.asset-card.sample .asset-header {
+  background: #2d2620;
+}
+.asset-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--ardour-fg-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.asset-body {
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.waveform-wrap {
+  position: relative;
+  height: 46px;
+  background: var(--ardour-bg-dark);
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.waveform-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.dsp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.chip {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 1px 6px;
+  background: var(--ardour-bg-dark);
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+  color: var(--ardour-clock-fg);
+}
+.chip.blue {
+  color: var(--ardour-selection);
+}
+.chip.amber {
+  color: var(--ardour-contrasting-alt);
+}
+.chip.red {
+  color: var(--ardour-alert-red);
+}
+.chip.neutral {
+  color: var(--ardour-fg-secondary);
+}
+
+/* 7-Band Spectral Mini-Meters (Ardour meter colors) */
+.eq-bars {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+  padding: 4px;
+  background: var(--ardour-bg-dark);
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+}
+.eq-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.eq-meter {
+  width: 100%;
+  height: 22px;
+  background: #1b1b1b;
+  border: 1px solid #000;
+  display: flex;
+  align-items: flex-end;
+}
+.eq-fill {
+  width: 100%;
+  background: linear-gradient(to top, var(--ardour-meter-0), var(--ardour-meter-2) 60%, var(--ardour-meter-4) 85%, var(--ardour-meter-6));
+}
+.eq-lbl {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ardour-fg-muted);
+  text-transform: uppercase;
+}
+
+.meta-row {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+.meta-row .ardour-select {
+  width: 145px;
+  height: 23px;
+  font-size: 11px;
+}
+.meta-row .ardour-input {
+  flex: 1;
+  height: 23px;
+  font-size: 11px;
+}
+
+/* ---------- Lyrics Editor & Timeline ---------- */
+.lyrics-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.lyrics-editor {
+  width: 100%;
+  min-height: 240px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.aligned-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  background: var(--ardour-bg-dark);
+  border: 1px solid var(--ardour-border);
+}
+.aligned-table th,
+.aligned-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--ardour-border-soft);
+  text-align: left;
+}
+.aligned-table th {
+  background: var(--ardour-bg);
+  color: var(--ardour-fg-secondary);
+}
+.aligned-table .ts {
+  font-family: var(--font-mono);
+  color: var(--ardour-clock-fg);
+  white-space: nowrap;
+}
+
+/* ---------- Skills & Providers Forms ---------- */
+.skill-card,
+.provider-card {
+  background: var(--ardour-bg-track);
+  border: 1px solid var(--ardour-border);
+  border-radius: 3px;
+  padding: 7px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.skill-card.disabled {
+  opacity: 0.6;
+}
+.card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.card-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--ardour-fg-bright);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.card-desc {
+  font-size: 11px;
+  color: var(--ardour-fg-secondary);
+}
+
+.form-box {
+  background: var(--ardour-bg-track);
+  border: 1px solid var(--ardour-border);
+  border-radius: 3px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.field label {
+  font-size: 11px;
+  color: var(--ardour-fg-secondary);
+}
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+}
+.check-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+/* ---------- Right Pane: AI Producer Chat ---------- */
+.chat-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--ardour-bg-track);
+}
+
+/* Live Production Plan Strip */
+.plan-bar {
+  background: var(--ardour-bg-panel);
+  border-bottom: 1px solid var(--ardour-border);
+  padding: 6px 10px;
+}
+.plan-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ardour-fg-secondary);
+  cursor: pointer;
+}
+.plan-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.plan-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  background: var(--ardour-bg-dark);
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+  font-size: 11px;
+  color: var(--ardour-fg-secondary);
+}
+.plan-step.in_progress {
+  border-color: var(--ardour-alert-orange);
+  color: var(--ardour-fg-bright);
+}
+.plan-step.done {
+  border-color: var(--ardour-widget-green);
+  color: var(--ardour-fg);
+}
+
+/* Chat Messages Feed */
+.chat-feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  user-select: text;
+}
+.empty-welcome {
+  margin: auto;
+  max-width: 560px;
+  padding: 16px;
+  background: var(--ardour-bg-panel);
+  border: 1px solid var(--ardour-border);
+  border-radius: 3px;
+}
+.empty-welcome h2 {
+  font-size: 14px;
+  margin-bottom: 6px;
+  color: var(--ardour-fg-bright);
+}
+.empty-welcome p {
+  color: var(--ardour-fg-secondary);
+  margin-bottom: 8px;
+}
+.quick-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.msg {
+  border: 1px solid var(--ardour-border);
+  border-radius: 3px;
+  overflow: hidden;
+  max-width: 96%;
+}
+.msg.user {
+  align-self: flex-end;
+  min-width: 240px;
+  background: var(--ardour-widget-blue-dark);
+  border-left: 3px solid var(--ardour-selection);
+}
+.msg.assistant {
+  align-self: flex-start;
+  width: 100%;
+  background: var(--ardour-bg-panel);
+  border-left: 3px solid var(--ardour-page-active);
+}
+.msg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 9px;
+  background: rgba(0, 0, 0, 0.25);
+  border-bottom: 1px solid var(--ardour-border-soft);
+  font-size: 11px;
+  color: var(--ardour-fg-secondary);
+}
+.msg-body {
+  padding: 9px 11px;
+  font-size: 12.5px;
+  line-height: 1.52;
+  word-break: break-word;
+}
+.msg-body p {
+  margin-bottom: 6px;
+}
+.msg-body p:last-child {
+  margin-bottom: 0;
+}
+.msg-body ul, .msg-body ol {
+  margin: 4px 0 6px 18px;
+}
+.msg-body code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: var(--ardour-bg-dark);
+  padding: 1px 4px;
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+  color: var(--ardour-clock-fg);
+}
+.msg-body pre {
+  background: var(--ardour-bg-dark);
+  border: 1px solid var(--ardour-border);
+  padding: 8px;
+  border-radius: 2px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+.msg-body pre code {
+  border: none;
+  padding: 0;
+  color: var(--ardour-fg);
+}
+.msg-body a {
+  color: var(--ardour-selection);
+}
+
+/* Tool Execution Trace Accordion */
+.tool-log {
+  margin: 6px 9px 8px;
+  background: var(--ardour-bg-dark);
+  border: 1px solid var(--ardour-border);
+  border-radius: 2px;
+}
+.tool-log summary {
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ardour-fg-secondary);
+  cursor: pointer;
+}
+.tool-list {
+  border-top: 1px solid var(--ardour-border-soft);
+  padding: 5px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.tool-row .tname {
+  color: var(--ardour-selection);
+  font-weight: 600;
+}
+.tool-row .tdur {
+  color: var(--ardour-fg-muted);
+  font-size: 10px;
+}
+.tool-row .tres {
+  color: var(--ardour-fg-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Interactive Plugin / Addon Install Card */
+.plugin-card {
+  margin: 8px 9px;
+  background: var(--ardour-bg-track);
+  border: 1px solid var(--ardour-contrasting-alt);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.plugin-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 9px;
+  background: var(--ardour-widget-orange);
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 12px;
+}
+.plugin-card-body {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.plugin-path {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  background: var(--ardour-bg-dark);
+  border: 1px solid var(--ardour-border);
+  padding: 4px 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ardour-clock-fg);
+}
+.plugin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+/* Composer Strip */
+.composer-wrap {
+  background: var(--ardour-bg-panel);
+  border-top: 1px solid var(--ardour-border);
+  padding: 7px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.composer-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--ardour-fg-secondary);
+}
+.ctx-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+.composer-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+}
+.composer-input-row textarea {
+  flex: 1;
+  min-height: 46px;
+  max-height: 150px;
+  line-height: 1.4;
+}
+.composer-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.status-toast {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  background: var(--ardour-bg-dark);
+  color: var(--ardour-clock-fg);
+  border: 1px solid var(--ardour-page-active);
+  padding: 6px 12px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  z-index: 999;
+  display: none;
+}
+.status-toast.show {
+  display: block;
+}
