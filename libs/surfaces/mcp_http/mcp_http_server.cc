@@ -5211,6 +5211,7 @@ handle_plugin_tool_call (ARDOUR::Session& session, PBD::EventLoop* event_loop, c
 {
 	ARDOUR::Session& _session    = session;
 	PBD::EventLoop*  _event_loop = event_loop;
+	(void)_event_loop;
 
 	if (tool_name == "plugin/list_available") {
 		const std::string search           = root.get<std::string> ("params.arguments.search", "");

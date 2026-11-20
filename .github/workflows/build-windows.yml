@@ -136,9 +136,21 @@ jobs:
           mkdir -p "$STAGE"
           cp -r "$PWD/dist_install/"* "$STAGE/"
 
-          # Verify Ardour executable and MCP HTTP control surface exist
+          # Verify Ardour executable, PortAudio backend, and MCP HTTP control surface exist
           echo "=== Verifying built binaries ==="
-          find "$STAGE" -maxdepth 4 \( -name "ardour*.exe" -o -name "*mcp_http*.dll" \) -print
+          find "$STAGE" -maxdepth 5 \( -name "ardour*.exe" -o -name "*mcp_http*.dll" -o -name "*portaudio*.dll" \) -print
+          if [ -z "$(find "$STAGE" -maxdepth 5 -name "ardour-*.exe" ! -name "*scanner*" -print -quit)" ]; then
+            echo "ERROR: ardour executable missing in $STAGE" >&2
+            exit 1
+          fi
+          if [ -z "$(find "$STAGE" -maxdepth 5 -name "*mcp_http*.dll" -print -quit)" ]; then
+            echo "ERROR: ardour_mcp_http.dll missing in $STAGE" >&2
+            exit 1
+          fi
+          if [ -z "$(find "$STAGE" -maxdepth 5 -name "*portaudio*.dll" -print -quit)" ]; then
+            echo "ERROR: portaudio backend dll missing in $STAGE" >&2
+            exit 1
+          fi
 
           # Copy required UCRT64 runtime DLLs recursively via ldd
           BIN_DIR="$STAGE/bin"
@@ -172,15 +184,28 @@ jobs:
           # Create 1-click Windows launchers
           cat > "$STAGE/Launch_Ardour_AI_Music.bat" << 'EOF'
           @echo off
-          setlocal
+          setlocal enabledelayedexpansion
           set "ROOT=%~dp0"
           set "PATH=%ROOT%bin;%ROOT%lib\ardour9;%PATH%"
           set "AI_MUSIC_STUDIO_DIR=%ROOT%ai_music_studio"
-          for %%F in ("%ROOT%bin\ardour*.exe") do (
-            start "" "%%~fF" %*
+          set "ARDOUR_EXE="
+          for %%D in ("%ROOT%bin" "%ROOT%lib\ardour9" "%ROOT%lib") do (
+            if exist "%%~D" (
+              for %%F in ("%%~D\ardour-*.exe" "%%~D\ardour*.exe") do (
+                set "NM=%%~nF"
+                if "!NM:scanner=!"=="!NM!" (
+                  set "ARDOUR_EXE=%%~fF"
+                  goto :launch
+                )
+              )
+            )
+          )
+          :launch
+          if defined ARDOUR_EXE (
+            start "" "!ARDOUR_EXE!" %*
             exit /b 0
           )
-          echo Ardour executable not found in %ROOT%bin
+          echo Ardour executable not found in %ROOT%bin or %ROOT%lib\ardour9
           pause
           EOF
 

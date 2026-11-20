@@ -827,6 +827,32 @@ int main() { return 0; }''',
     conf.env.append_value('CXXFLAGS', cxx_flags)
     conf.env.append_value('LINKFLAGS', linker_flags)
 
+    if Options.options.dist_target == 'mingw' and not is_clang:
+        # Suppress legacy third-party/GTK2/C++20 warnings on MinGW GCC (appended after -Wall/-Wcast-qual)
+        mingw_c_nowarn = [
+            '-Wno-attributes', '-Wno-unknown-pragmas', '-Wno-missing-prototypes',
+            '-Wno-unused-variable', '-Wno-deprecated-declarations', '-Wno-maybe-uninitialized',
+            '-Wno-unused-but-set-variable', '-Wno-format', '-Wno-unused-value',
+            '-Wno-discarded-qualifiers', '-Wno-pointer-sign', '-Wno-unused-result',
+            '-Wno-sign-compare', '-Wno-parentheses', '-Wno-format-truncation',
+            '-Wno-restrict', '-Wno-unused-function', '-Wno-misleading-indentation',
+            '-Wno-address',
+        ]
+        mingw_cxx_nowarn = [
+            '-Wno-attributes', '-Wno-cast-qual', '-Wno-unknown-pragmas',
+            '-Wno-deprecated-enum-enum-conversion', '-Wno-unused-variable',
+            '-Wno-deprecated-declarations', '-Wno-sfinae-incomplete',
+            '-Wno-maybe-uninitialized', '-Wno-dangling-pointer', '-Wno-deprecated',
+            '-Wno-unused-but-set-variable', '-Wno-volatile', '-Wno-format',
+            '-Wno-unused-value', '-Wno-deprecated-copy', '-Wno-overloaded-virtual',
+            '-Wno-class-memaccess', '-Wno-unused-result', '-Wno-sign-compare',
+            '-Wno-parentheses', '-Wno-subobject-linkage', '-Wno-misleading-indentation',
+            '-Wno-format-truncation', '-Wno-restrict', '-Wno-stringop-overflow',
+            '-Wno-unused-function', '-Wno-address',
+        ]
+        conf.env.append_value('CFLAGS', mingw_c_nowarn)
+        conf.env.append_value('CXXFLAGS', mingw_cxx_nowarn)
+
 def create_resource_file(name):
     try:
         text = 'IDI_ICON1 ICON DISCARDABLE "icons/' + name + '.ico"\n'
