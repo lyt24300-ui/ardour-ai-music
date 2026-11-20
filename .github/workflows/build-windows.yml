@@ -99,6 +99,7 @@ jobs:
           export AR="$UCRT_WIN/bin/ar.exe"
           export WINRC="$UCRT_WIN/bin/windres.exe"
           export PKG_CONFIG_PATH="$UCRT_WIN/lib/pkgconfig:$UCRT_WIN/share/pkgconfig"
+          export CXXFLAGS="-fno-char8_t -Wa,-mbig-obj -Wno-deprecated-declarations"
           export LDFLAGS="-L$UCRT_WIN/lib"
           if ! python3 waf configure \
             --check-c-compiler=gcc \
