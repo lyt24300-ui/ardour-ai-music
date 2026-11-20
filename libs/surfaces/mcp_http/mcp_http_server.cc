@@ -8018,7 +8018,7 @@ handle_master_get_info_tool (ARDOUR::Session& session, const std::string& id)
 	std::shared_ptr<ARDOUR::AutomationControl> mute = master->mute_control ();
 
 	const double gain_val = gain ? gain->get_value () : 1.0;
-	const double gain_db  = (gain_val > 0.0) ? ARDOUR::accurate_coefficient_to_dB (gain_val) : -193.0;
+	const double gain_db  = (gain_val > 0.0) ? accurate_coefficient_to_dB ((float)gain_val) : -193.0;
 
 	std::ostringstream plugins_json;
 	plugins_json << "[";
@@ -8195,7 +8195,7 @@ handle_audio_import_file_tool (ARDOUR::Session& session, pt::ptree& root, const 
 		const uint32_t chans = std::max<uint32_t> (1, (uint32_t)status.sources.size ());
 		const int      in_ch = (chans >= 2) ? 2 : 1;
 		const int      out_ch = 2;
-		std::string    tname = track_name.empty () ? PBD::basename_nosuffix (file_path) : track_name;
+		std::string    tname = track_name.empty () ? std::string (PBD::basename_nosuffix (file_path)) : track_name;
 		std::list<std::shared_ptr<ARDOUR::AudioTrack>> created = session.new_audio_track (
 		    in_ch,
 		    out_ch,
@@ -8220,7 +8220,7 @@ handle_audio_import_file_tool (ARDOUR::Session& session, pt::ptree& root, const 
 	PBD::PropertyList plist;
 	plist.add (ARDOUR::Properties::start, Temporal::timepos_t (0));
 	plist.add (ARDOUR::Properties::length, status.sources.front ()->length ());
-	plist.add (ARDOUR::Properties::name, region_name.empty () ? PBD::basename_nosuffix (file_path) : region_name);
+	plist.add (ARDOUR::Properties::name, region_name.empty () ? std::string (PBD::basename_nosuffix (file_path)) : region_name);
 	plist.add (ARDOUR::Properties::whole_file, true);
 
 	std::shared_ptr<ARDOUR::Region> region = ARDOUR::RegionFactory::create (status.sources, plist, true);
@@ -8262,11 +8262,11 @@ handle_region_set_fades_tool (ARDOUR::Session& session, pt::ptree& root, const s
 
 	const double sr = (double)session.sample_rate ();
 	if (fade_in_ms && *fade_in_ms >= 0.0) {
-		areg->set_fade_in_length ((samplecnt_t)std::llround ((*fade_in_ms / 1000.0) * sr));
+		areg->set_fade_in_length ((ARDOUR::samplecnt_t)std::llround ((*fade_in_ms / 1000.0) * sr));
 		areg->set_fade_in_active (*fade_in_ms > 0.0);
 	}
 	if (fade_out_ms && *fade_out_ms >= 0.0) {
-		areg->set_fade_out_length ((samplecnt_t)std::llround ((*fade_out_ms / 1000.0) * sr));
+		areg->set_fade_out_length ((ARDOUR::samplecnt_t)std::llround ((*fade_out_ms / 1000.0) * sr));
 		areg->set_fade_out_active (*fade_out_ms > 0.0);
 	}
 	if (fade_in_act) {
@@ -8328,7 +8328,7 @@ handle_automation_set_points_tool (ARDOUR::Session& session, pt::ptree& root, co
 		return jsonrpc_error (id, -32602, "Target automation control not available");
 	}
 
-	boost::optional<const pt::ptree&> pts_node = root.get_child_optional ("params.arguments.points");
+	boost::optional<pt::ptree&> pts_node = root.get_child_optional ("params.arguments.points");
 	if (!pts_node) {
 		return jsonrpc_error (id, -32602, "Missing points array");
 	}
@@ -8336,7 +8336,7 @@ handle_automation_set_points_tool (ARDOUR::Session& session, pt::ptree& root, co
 	Temporal::TempoMap::fetch ();
 	std::shared_ptr<ARDOUR::AutomationList> alist = ctrl->alist ();
 	if (clear_ex) {
-		alist->clear_list ();
+		alist->clear ();
 	}
 
 	int added = 0;
@@ -8346,12 +8346,12 @@ handle_automation_set_points_tool (ARDOUR::Session& session, pt::ptree& root, co
 		if (!val || !std::isfinite (*val)) {
 			continue;
 		}
-		samplepos_t                  when_sample = 0;
+		ARDOUR::samplepos_t          when_sample = 0;
 		const std::optional<int64_t> s_arg       = get_optional_std<int64_t> (p, "sample");
 		const std::optional<int>     b_arg       = get_optional_std<int> (p, "bar");
 		const double                 bt_arg      = p.get<double> ("beat", 1.0);
 		if (s_arg) {
-			when_sample = std::max<samplepos_t> (0, (samplepos_t)*s_arg);
+			when_sample = std::max<ARDOUR::samplepos_t> (0, (ARDOUR::samplepos_t)*s_arg);
 		} else if (b_arg) {
 			std::string bbt_err;
 			if (!parse_bbt_target_sample (*b_arg, bt_arg, when_sample, bbt_err)) {
