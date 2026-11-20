@@ -19,10 +19,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure a version tag exists (repo pushed without upstream tags)
+      - name: Ensure an annotated version tag exists for git describe
         shell: bash
         run: |
-          git describe HEAD >/dev/null 2>&1 || git tag 9.10
+          git config user.name "ardour-ci"
+          git config user.email "ci@ardour.org"
+          git tag -a -f 9.10 -m "Ardour 9.10"
+          git describe HEAD
 
       - name: Setup MSYS2 MINGW64 + Ardour Build Dependencies
         uses: msys2/setup-msys2@v2
