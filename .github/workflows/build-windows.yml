@@ -93,11 +93,21 @@ jobs:
       - name: Configure Ardour with Waf (UCRT64 + PortAudio + MCP HTTP)
         run: |
           set -e
-          export PKG_CONFIG_PATH="/ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig"
+          UCRT_WIN=$(cygpath -m /ucrt64)
+          export CC="$UCRT_WIN/bin/gcc.exe"
+          export CXX="$UCRT_WIN/bin/g++.exe"
+          export AR="$UCRT_WIN/bin/ar.exe"
+          export WINRC="$UCRT_WIN/bin/windres.exe"
+          export PKG_CONFIG_PATH="$UCRT_WIN/lib/pkgconfig:$UCRT_WIN/share/pkgconfig"
+          export LDFLAGS="-L$UCRT_WIN/lib"
           if ! python3 waf configure \
+            --check-c-compiler=gcc \
+            --check-cxx-compiler=g++ \
             --dist-target=mingw \
+            --also-include="$UCRT_WIN/include" \
             --with-backends=portaudio,dummy \
             --no-lrdf \
+            --no-dr-mingw \
             --optimize \
             --prefix="$PWD/dist_install"; then
             echo "=== build/config.log tail ==="
@@ -108,7 +118,8 @@ jobs:
       - name: Build Ardour + AI Music Tab + Extended MCP HTTP
         run: |
           set -e
-          export PKG_CONFIG_PATH="/ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig"
+          UCRT_WIN=$(cygpath -m /ucrt64)
+          export PKG_CONFIG_PATH="$UCRT_WIN/lib/pkgconfig:$UCRT_WIN/share/pkgconfig"
           python3 waf build -j$(nproc)
 
       - name: Install into staging folder
