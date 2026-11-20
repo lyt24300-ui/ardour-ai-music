@@ -27,62 +27,82 @@ jobs:
           git tag -a -f 9.10 -m "Ardour 9.10"
           git describe HEAD
 
-      - name: Setup MSYS2 MINGW64 + Ardour Build Dependencies
+      - name: Setup MSYS2 MINGW64
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
-          pacboy: >-
-            toolchain:p
-            pkgconf:p
-            python:p
-            dlfcn:p
-            boost:p
-            glib2:p
-            glibmm:p
-            libsigc++:p
-            cairo:p
-            cairomm:p
-            pango:p
-            pangomm:p
-            gdk-pixbuf2:p
-            libpng:p
-            fontconfig:p
-            freetype:p
-            libxml2:p
-            libsndfile:p
-            libsamplerate:p
-            curl:p
-            libarchive:p
-            liblo:p
-            taglib:p
-            vamp-plugin-sdk:p
-            rubberband:p
-            fftw:p
-            lv2:p
-            serd:p
-            sord:p
-            sratom:p
-            lilv:p
-            aubio:p
-            libogg:p
-            flac:p
-            portaudio:p
-            libwebsockets:p
-            openssl:p
-            libusb:p
-            gettext-tools:p
+
+      - name: Install Ardour Build Dependencies (with mirror retry)
+        run: |
+          set -e
+          PKGS=(
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-dlfcn
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-glibmm
+            mingw-w64-x86_64-libsigc++
+            mingw-w64-x86_64-cairo
+            mingw-w64-x86_64-cairomm
+            mingw-w64-x86_64-pango
+            mingw-w64-x86_64-pangomm
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-freetype
+            mingw-w64-x86_64-libxml2
+            mingw-w64-x86_64-libsndfile
+            mingw-w64-x86_64-libsamplerate
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libarchive
+            mingw-w64-x86_64-liblo
+            mingw-w64-x86_64-taglib
+            mingw-w64-x86_64-vamp-plugin-sdk
+            mingw-w64-x86_64-rubberband
+            mingw-w64-x86_64-fftw
+            mingw-w64-x86_64-lv2
+            mingw-w64-x86_64-serd
+            mingw-w64-x86_64-sord
+            mingw-w64-x86_64-sratom
+            mingw-w64-x86_64-lilv
+            mingw-w64-x86_64-aubio
+            mingw-w64-x86_64-libogg
+            mingw-w64-x86_64-flac
+            mingw-w64-x86_64-portaudio
+            mingw-w64-x86_64-libwebsockets
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-cppunit
+            mingw-w64-x86_64-gettext-tools
+          )
+          for attempt in 1 2 3; do
+            if pacman -Syy --noconfirm --needed "${PKGS[@]}"; then
+              break
+            fi
+            echo "pacman attempt $attempt failed, retrying in 5s..."
+            sleep 5
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+          done
 
       - name: Configure Ardour with Waf (MinGW64 + PortAudio + MCP HTTP)
         run: |
           set -e
           export PKG_CONFIG_PATH="/mingw64/lib/pkgconfig:/mingw64/share/pkgconfig"
-          python3 waf configure \
+          if ! python3 waf configure \
             --dist-target=mingw \
             --with-backends=portaudio,dummy \
             --no-lrdf \
             --optimize \
-            --prefix="$PWD/dist_install"
+            --prefix="$PWD/dist_install"; then
+            echo "=== build/config.log tail ==="
+            tail -n 120 build/config.log || true
+            exit 1
+          fi
 
       - name: Build Ardour + AI Music Tab + Extended MCP HTTP
         run: |
