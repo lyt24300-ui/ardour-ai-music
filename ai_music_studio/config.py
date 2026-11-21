@@ -9,7 +9,26 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = BASE_DIR.parent
 ARDOUR_ROOT = WORKSPACE_ROOT / "ardour"
-ARDOUR_THEMES_DIR = ARDOUR_ROOT / "gtk2_ardour" / "themes"
+
+
+def _resolve_themes_dir() -> Path:
+    candidates: list[Path] = []
+    data_env = os.environ.get("ARDOUR_DATA_PATH", "")
+    for part in data_env.split(os.pathsep):
+        if part.strip():
+            candidates.append(Path(part.strip()) / "themes")
+    candidates.extend([
+        WORKSPACE_ROOT / "share" / "ardour9" / "themes",
+        WORKSPACE_ROOT / "gtk2_ardour" / "themes",
+        ARDOUR_ROOT / "gtk2_ardour" / "themes",
+    ])
+    for cand in candidates:
+        if cand.is_dir():
+            return cand
+    return WORKSPACE_ROOT / "share" / "ardour9" / "themes"
+
+
+ARDOUR_THEMES_DIR = _resolve_themes_dir()
 
 DATA_DIR = BASE_DIR / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"

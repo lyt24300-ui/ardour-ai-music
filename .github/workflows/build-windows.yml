@@ -175,6 +175,15 @@ jobs:
           cp -r /ucrt64/lib/gdk-pixbuf-2.0/* "$STAGE/lib/gdk-pixbuf-2.0/" 2>/dev/null || true
           cp -r /ucrt64/share/glib-2.0/schemas/* "$STAGE/share/glib-2.0/schemas/" 2>/dev/null || true
 
+          # Fix clearlooks GTK2 engine filename (ytk looks for libclearlooks.dll under GTK_PATH/engines)
+          if [ -f "$STAGE/lib/ardour9/engines/clearlooks.dll" ] && [ ! -f "$STAGE/lib/ardour9/engines/libclearlooks.dll" ]; then
+            cp "$STAGE/lib/ardour9/engines/clearlooks.dll" "$STAGE/lib/ardour9/engines/libclearlooks.dll"
+          fi
+
+          # Place VST scanner binaries in lib/ardour9/fst where Ardour searches on Windows
+          mkdir -p "$STAGE/lib/ardour9/fst"
+          cp "$STAGE/lib/ardour9"/ardour-vst*.exe "$STAGE/lib/ardour9/fst/" 2>/dev/null || true
+
           # Include AI Music Studio companion app next to Ardour
           if [ -d "$PWD/ai_music_studio" ]; then
             cp -r "$PWD/ai_music_studio" "$STAGE/ai_music_studio"
@@ -186,14 +195,21 @@ jobs:
           @echo off
           setlocal enabledelayedexpansion
           set "ROOT=%~dp0"
-          set "PATH=%ROOT%bin;%ROOT%lib\ardour9;%PATH%"
-          set "AI_MUSIC_STUDIO_DIR=%ROOT%ai_music_studio"
+          if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+          cd /d "%ROOT%"
+          set "PATH=%ROOT%\bin;%ROOT%\lib\ardour9;%PATH%"
+          set "ARDOUR_CONFIG_PATH=%ROOT%\etc\ardour9;%ROOT%\share\ardour9"
+          set "ARDOUR_DATA_PATH=%ROOT%\share\ardour9"
+          set "ARDOUR_DLL_PATH=%ROOT%\lib\ardour9"
+          set "GTK_PATH=%ROOT%\lib\ardour9"
+          set "GDK_PIXBUF_MODULE_FILE=%ROOT%\lib\gdk-pixbuf-2.0\2.10.0\loaders.cache"
+          set "AI_MUSIC_STUDIO_DIR=%ROOT%\ai_music_studio"
           set "ARDOUR_EXE="
-          for %%D in ("%ROOT%bin" "%ROOT%lib\ardour9" "%ROOT%lib") do (
+          for %%D in ("%ROOT%\lib\ardour9" "%ROOT%\bin" "%ROOT%\lib") do (
             if exist "%%~D" (
-              for %%F in ("%%~D\ardour-*.exe" "%%~D\ardour*.exe") do (
+              for %%F in ("%%~D\ardour-*.exe") do (
                 set "NM=%%~nF"
-                if "!NM:scanner=!"=="!NM!" (
+                if "!NM:scanner=!"=="!NM!" if "!NM:lua=!"=="!NM!" if "!NM:export=!"=="!NM!" if "!NM:session=!"=="!NM!" (
                   set "ARDOUR_EXE=%%~fF"
                   goto :launch
                 )
@@ -202,10 +218,10 @@ jobs:
           )
           :launch
           if defined ARDOUR_EXE (
-            start "" "!ARDOUR_EXE!" %*
+            start "" /D "%ROOT%" "!ARDOUR_EXE!" %*
             exit /b 0
           )
-          echo Ardour executable not found in %ROOT%bin or %ROOT%lib\ardour9
+          echo Ardour executable not found in %ROOT%\lib\ardour9 or %ROOT%\bin
           pause
           EOF
 
@@ -213,6 +229,7 @@ jobs:
           @echo off
           cd /d "%~dp0"
           set "PYTHONPATH=%~dp0"
+          if not defined ARDOUR_DATA_PATH set "ARDOUR_DATA_PATH=%~dp0share\ardour9"
           python -m ai_music_studio.launcher %*
           EOF
 
