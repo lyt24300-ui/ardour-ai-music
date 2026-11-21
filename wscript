@@ -830,15 +830,17 @@ int main() { return 0; }''',
     if Options.options.dist_target == 'mingw' and not is_clang:
         # Suppress legacy third-party/GTK2/C++20 warnings on MinGW GCC (appended after -Wall/-Wcast-qual)
         mingw_c_nowarn = [
-            '-Wno-attributes', '-Wno-unknown-pragmas', '-Wno-missing-prototypes',
-            '-Wno-unused-variable', '-Wno-deprecated-declarations', '-Wno-maybe-uninitialized',
+            '-Wno-attributes', '-Wno-cast-qual', '-Wno-unknown-pragmas',
+            '-Wno-missing-prototypes', '-Wno-unused-variable',
+            '-Wno-deprecated-declarations', '-Wno-maybe-uninitialized',
             '-Wno-unused-but-set-variable', '-Wno-format', '-Wno-unused-value',
             '-Wno-discarded-qualifiers', '-Wno-pointer-sign', '-Wno-unused-result',
             '-Wno-sign-compare', '-Wno-parentheses', '-Wno-format-truncation',
             '-Wno-restrict', '-Wno-unused-function', '-Wno-misleading-indentation',
-            '-Wno-address',
+            '-Wno-address', '-Wno-switch', '-Wno-cpp',
         ]
         mingw_cxx_nowarn = [
+            '-std=gnu++17',
             '-Wno-attributes', '-Wno-cast-qual', '-Wno-unknown-pragmas',
             '-Wno-deprecated-enum-enum-conversion', '-Wno-unused-variable',
             '-Wno-deprecated-declarations', '-Wno-sfinae-incomplete',
@@ -848,7 +850,7 @@ int main() { return 0; }''',
             '-Wno-class-memaccess', '-Wno-unused-result', '-Wno-sign-compare',
             '-Wno-parentheses', '-Wno-subobject-linkage', '-Wno-misleading-indentation',
             '-Wno-format-truncation', '-Wno-restrict', '-Wno-stringop-overflow',
-            '-Wno-unused-function', '-Wno-address',
+            '-Wno-unused-function', '-Wno-address', '-Wno-switch', '-Wno-cpp',
         ]
         conf.env.append_value('CFLAGS', mingw_c_nowarn)
         conf.env.append_value('CXXFLAGS', mingw_cxx_nowarn)

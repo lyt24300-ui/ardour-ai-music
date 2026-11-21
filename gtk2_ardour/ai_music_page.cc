@@ -153,11 +153,7 @@ AiMusicPage::get_state () const
 int
 AiMusicPage::set_state (const XMLNode& node, int version)
 {
-	XMLNode* t = node.child (Tabbable::xml_node_name.c_str ());
-	if (t) {
-		Tabbable::set_state (*t, version);
-	}
-	return 0;
+	return Tabbable::set_state (node, version);
 }
 
 void
