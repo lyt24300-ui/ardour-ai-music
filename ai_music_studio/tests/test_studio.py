@@ -341,9 +341,28 @@ def test_full_agent_and_api_end_to_end() -> None:
         llm_srv.shutdown()
 
 
+def test_sound_library_and_mastery_skill() -> None:
+    from ai_music_studio.agent import STUDIO_NATIVE_TOOLS
+    from ai_music_studio.sound_library import inspect_sound_library
+
+    tool_names = {t["function"]["name"] for t in STUDIO_NATIVE_TOOLS}
+    assert "studio_inspect_sound_library" in tool_names
+
+    lib = inspect_sound_library(category="all", limit=10)
+    assert "soundfonts_count" in lib and "total_audio_samples" in lib
+
+    with tempfile.TemporaryDirectory() as td:
+        st = StudioStorage(Path(td))
+        skills = {s.id: s for s in st.list_skills()}
+        assert "plugin_sound_mastery" in skills
+        assert skills["plugin_sound_mastery"].enabled is True
+    print(f"[PASS] Sound library ({lib['soundfonts_count']} sf2, {lib['nam_models_count']} nam, {lib['total_audio_samples']} samples) & mastery skill")
+
+
 if __name__ == "__main__":
     test_themes()
     test_audio_dsp_and_alignment()
     test_react_parser()
+    test_sound_library_and_mastery_skill()
     test_full_agent_and_api_end_to_end()
-    print("\nALL STAGE 1-4 VERIFICATION TESTS PASSED!")
+    print("\nALL STAGE 1-5 VERIFICATION TESTS PASSED!")

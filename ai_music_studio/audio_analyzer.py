@@ -713,6 +713,8 @@ def align_vocal_with_lyrics(
 
     if whisper_enabled:
         try:
+            import os
+            os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
             from faster_whisper import WhisperModel
 
             model = _WHISPER_CACHE.get(whisper_model_size)

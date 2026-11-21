@@ -219,10 +219,24 @@ class ArdourMCPClient:
 
     async def get_session_snapshot_context(self) -> dict[str, Any]:
         """Gather compact live session state (info, tracks, markers, available plugins)."""
+        try:
+            from .sound_library import inspect_sound_library
+            lib = inspect_sound_library(category="all", limit=15)
+            library_summary: dict[str, Any] = {
+                "soundfonts_count": lib.get("soundfonts_count", 0),
+                "nam_models_count": lib.get("nam_models_count", 0),
+                "total_audio_samples": lib.get("total_audio_samples", 0),
+                "top_sample_categories": dict(list(lib.get("category_counts", {}).items())[:15]),
+                "nam_models": [m.get("name") for m in lib.get("nam_models", [])],
+            }
+        except Exception:
+            library_summary = {}
+
         ctx: dict[str, Any] = {
             "connected": False,
             "soundfonts": _discover_soundfonts(),
             "fluid_synth_presets": _discover_fluidsynth_presets(),
+            "sound_library_summary": library_summary,
         }
         try:
             info = await self.call_tool("session_get_info", {})

@@ -155,6 +155,21 @@ STUDIO_NATIVE_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_inspect_sound_library",
+            "description": "Inspect installed SoundFonts (.sf2), WAV audio samples/loops, and Neural Amp Modeler (.nam) amp captures in the project sound library. Filter by category (e.g. drums, 808, 909, bass, piano, guitar, synth, nam, sf2, all) or search query.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Filter category: all, sf2, nam, drums, 808, 909, bass, guitar, piano, synth, pad, etc."},
+                    "query": {"type": "string", "description": "Optional filename/folder substring filter."},
+                    "limit": {"type": "integer", "minimum": 5, "maximum": 120},
+                },
+            },
+        },
+    },
 ]
 
 
@@ -266,10 +281,12 @@ class AIProducerAgent:
 
 ## Главные принципы работы
 1. **Полный контроль над движком Ardour:** все инструменты с префиксом `ardour__` напрямую управляют открытой сессией Ardour (треки, шины, мастер, импорт аудио, разрезка/перемещение/фейды регионов, MIDI JSON, автоматизация, плагины и их параметры, темп, маркеры, рендер, Lua-скрипты).
-2. **Не работай вслепую:** опирайся на DSP-паспорт референсов (BPM, тональность, LUFS, 7-полосный спектр, стереоширина) и таймкоды вокала (`studio_align_vocal_lyrics`).
+2. **Не работай вслепую (Исследование перед применением):**
+   - **Изучай плагины перед настройкой:** добавив или выбрав плагин (`ardour__plugin_list_available`), ВСЕГДА вызывай `ardour__plugin_get_description` (изучи имена параметров, их реальные диапазоны min..max и единицы измерения) и проверяй пресеты/доки через Lua (`plug:get_info():get_presets(false)`, `plug:get_docs()`). Для незнакомых или продвинутых сторонних плагинов (Airwindows Consolidated, Surge XT / Effects, Dexed, Neural Amp Modeler, TDR Nova / Kotelnikov / SlickEQ / Molotok, Dragonfly Reverb, TAL-Reverb/Chorus/NoiseMaker, TSE BOD, LoudMax) используй `studio_web_search` / `studio_fetch_webpage`, чтобы узнать назначение ручек и оптимальные настройки («sweet spots»).
+   - **Изучай звуки и инструменты:** просматривай библиотеку через `studio_inspect_sound_library` (SoundFonts `.sf2`, WAV-сэмплы, `.nam` модели усилителей), проверяй референсы и сэмплы через `studio_analyze_audio` (BPM, тональность, LUFS, 7-полосный спектр, транзиенты) и таймкоды вокала (`studio_align_vocal_lyrics`).
 3. **План работы:** в начале сложной задачи всегда вызывай `studio_update_plan`, чтобы пользователь видел живой прогресс.
-4. **Плагины и Web Search:** сначала проверяй реально установленные плагины через `ardour__plugin_list_available`. Если не хватает важного инструмента/эффекта (например, качественного синта, автотюна, драм-машины или реверба), найди лучший актуальный вариант через `studio_web_search` и отправь карточку через `studio_request_plugin_install` с понятной инструкцией для Windows.
-5. **Безопасность:** если Ardour MCP не подключён (`connected: false`), честно сообщи об этом и предложи, что нужно сделать (открыть Ardour / включить MCPHttp), при этом всё равно можешь анализировать аудио, искать плагины и подготовить детальный план продакшна.
+4. **Плагины и Web Search:** сначала проверяй реально установленные плагины через `ardour__plugin_list_available`. Если не хватает важного инструмента/эффекта (например, редкого синтезатора или специфической обработки), найди лучший актуальный вариант через `studio_web_search` и отправь карточку через `studio_request_plugin_install` с понятной инструкцией для Windows (папка `BUILD\\lib\\ardour9\\VST3` или `%LOCALAPPDATA%\\Programs\\Common\\VST3`).
+5. **Безопасность:** если Ardour MCP не подключён (`connected: false`), честно сообщи об этом и предложи, что нужно сделать (открыть Ardour / включить MCPHttp), при этом всё равно можешь анализировать аудио, изучать локальную библиотеку звуков и подготовить детальный план продакшна.
 
 ## Критические правила по инструментам, SoundFont (.sf2) и Ardour Lua
 - **`ACE Fluid Synth` (`lv2:urn:ardour:a-fluidsynth`) НЕ имеет встроенных звуков!** Пока в него не загружен `.sf2` банк (SoundFont), он выдаёт полную тишину.
@@ -446,6 +463,15 @@ class AIProducerAgent:
         if fn_name == "studio_fetch_webpage":
             res = await fetch_webpage_text(str(args.get("url", "")))
             return bool(res.get("ok")), res
+
+        if fn_name == "studio_inspect_sound_library":
+            from .sound_library import inspect_sound_library
+            res = inspect_sound_library(
+                category=str(args.get("category", "all")),
+                query=str(args.get("query", "")),
+                limit=int(args.get("limit", 40) or 40),
+            )
+            return True, res
 
         if fn_name == "studio_request_plugin_install":
             card = PluginInstallCard(

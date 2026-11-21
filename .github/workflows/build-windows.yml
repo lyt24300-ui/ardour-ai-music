@@ -203,6 +203,10 @@ jobs:
           set "ARDOUR_DLL_PATH=%ROOT%\lib\ardour9"
           set "GTK_PATH=%ROOT%\lib\ardour9"
           set "GDK_PIXBUF_MODULE_FILE=%ROOT%\lib\gdk-pixbuf-2.0\2.10.0\loaders.cache"
+          set "VST3_PATH=%ROOT%\lib\ardour9\VST3;%LOCALAPPDATA%\Programs\Common\VST3"
+          set "LV2_PATH=%APPDATA%\LV2;%COMMONPROGRAMFILES%\LV2"
+          set "SURGE_DATA_PATH=%ROOT%\share\surge-xt"
+          set "HF_HUB_DISABLE_XET=1"
           set "AI_MUSIC_STUDIO_DIR=%ROOT%\ai_music_studio"
           set "ARDOUR_EXE="
           for %%D in ("%ROOT%\lib\ardour9" "%ROOT%\bin" "%ROOT%\lib") do (
