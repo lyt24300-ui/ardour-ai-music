@@ -22,6 +22,19 @@ from pathlib import Path
 from .config import DATA_DIR, STUDIO_HOST, STUDIO_PORT
 
 
+def _ensure_stdio() -> None:
+    """Attach stdout/stderr to a UTF-8 log file when launched via pythonw.exe (no console)."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = DATA_DIR / "studio.log"
+    stream = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
 def _base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
@@ -81,6 +94,7 @@ def _open_standalone_window(url: str) -> subprocess.Popen | None:
 
 
 def main() -> None:
+    _ensure_stdio()
     parser = argparse.ArgumentParser(description="Ardour AI Music Studio Launcher")
     parser.add_argument("--host", default=STUDIO_HOST)
     parser.add_argument("--port", type=int, default=STUDIO_PORT)
@@ -103,7 +117,7 @@ def main() -> None:
     import uvicorn
     from .server import app
 
-    server_cfg = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+    server_cfg = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning", use_colors=False)
     server = uvicorn.Server(server_cfg)
 
     if args.no_window:
@@ -122,11 +136,19 @@ def main() -> None:
 
     proc = _open_standalone_window(url)
     if proc is not None:
+        started_at = time.time()
         try:
             proc.wait()
         except KeyboardInterrupt:
-            pass
-        server.should_exit = True
+            server.should_exit = True
+            return
+        if time.time() - started_at > 3.0:
+            server.should_exit = True
+        else:
+            try:
+                t.join()
+            except KeyboardInterrupt:
+                server.should_exit = True
     else:
         try:
             t.join()
