@@ -239,8 +239,11 @@
                 <input id="setMcpUrl" class="ardour-input" value="http://127.0.0.1:4820/mcp" />
               </div>
               <div class="field">
-                <label>Макс. шагов агента</label>
-                <input id="setMaxSteps" type="number" min="3" max="100" value="35" class="ardour-input" />
+                <label>Макс. шагов / Реконнектов</label>
+                <div style="display:flex;gap:4px;">
+                  <input id="setMaxSteps" type="number" min="3" max="250" value="60" title="Макс. шагов агента" class="ardour-input" style="flex:1;" />
+                  <input id="setMaxReconnects" type="number" min="1" max="20" value="10" title="Авто-реконнектов при сбое связи (1..20)" class="ardour-input" style="width:62px;" />
+                </div>
               </div>
             </div>
             <div class="field-grid">

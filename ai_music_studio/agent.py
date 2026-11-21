@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+import logging
 import re
 import time
 import uuid
@@ -170,7 +172,111 @@ STUDIO_NATIVE_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_set_plugin_parameters",
+            "description": "Batch-set multiple parameters on an Ardour plugin in a single step (saves dozens of tool calls). Call ardour__plugin_get_description first to confirm exact parameterIndex and min..max range.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "route_id": {"type": "string", "description": "Track or bus ID (e.g. '302' or '82' for Master)."},
+                    "plugin_index": {"type": "integer", "description": "0-based plugin slot index on the track/bus."},
+                    "parameters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "parameter_index": {"type": "integer"},
+                                "value": {"type": "number"},
+                            },
+                            "required": ["parameter_index", "value"],
+                        },
+                    },
+                },
+                "required": ["route_id", "plugin_index", "parameters"],
+            },
+        },
+    },
 ]
+
+
+def _sanitize_schema_for_llm(node: Any) -> Any:
+    """Remove strict JSON-Schema fields (like additionalProperties) rejected by some LLM gateways."""
+    if isinstance(node, dict):
+        cleaned: dict[str, Any] = {}
+        for k, v in node.items():
+            if k == "additionalProperties":
+                continue
+            cleaned[k] = _sanitize_schema_for_llm(v)
+        return cleaned
+    if isinstance(node, list):
+        return [_sanitize_schema_for_llm(x) for x in node]
+    return node
+
+
+def _coerce_value_type(val: Any, target_type: str) -> Any:
+    if val is None or not target_type:
+        return val
+    if target_type == "string":
+        if isinstance(val, (int, float, bool)):
+            return str(val).lower() if isinstance(val, bool) else str(val)
+        return str(val)
+    if target_type == "integer":
+        if isinstance(val, bool):
+            return int(val)
+        if isinstance(val, int):
+            return val
+        if isinstance(val, float):
+            return int(round(val))
+        if isinstance(val, str):
+            try:
+                return int(float(val.strip()))
+            except Exception:
+                return val
+    if target_type == "number":
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            try:
+                return float(val.strip())
+            except Exception:
+                return val
+    if target_type == "boolean":
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            low = val.strip().lower()
+            if low in ("true", "1", "yes"):
+                return True
+            if low in ("false", "0", "no"):
+                return False
+        if isinstance(val, (int, float)):
+            return bool(val)
+    return val
+
+
+def _coerce_args_to_schema(args: dict[str, Any], schema: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Coerce LLM-provided tool arguments to match the MCP tool's JSON schema cleanly."""
+    if not isinstance(args, dict):
+        return {}
+    if not isinstance(schema, dict):
+        return args
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else None
+    strict = schema.get("additionalProperties") is False
+    out: dict[str, Any] = {}
+    for k, v in args.items():
+        if props is not None and strict and k not in props:
+            # Drop hallucinated metadata keys (e.g. 'reason') when MCP forbids additionalProperties
+            continue
+        if props and k in props and isinstance(props[k], dict):
+            t = str(props[k].get("type", ""))
+            v = _coerce_value_type(v, t)
+        out[k] = v
+    return out
+
+
+_LOGGER = logging.getLogger("ai_music_studio")
 
 
 def _sanitize_tool_name(name: str) -> str:
@@ -283,6 +389,7 @@ class AIProducerAgent:
 1. **Полный контроль над движком Ardour:** все инструменты с префиксом `ardour__` напрямую управляют открытой сессией Ardour (треки, шины, мастер, импорт аудио, разрезка/перемещение/фейды регионов, MIDI JSON, автоматизация, плагины и их параметры, темп, маркеры, рендер, Lua-скрипты).
 2. **Не работай вслепую (Исследование перед применением):**
    - **Изучай плагины перед настройкой:** добавив или выбрав плагин (`ardour__plugin_list_available`), ВСЕГДА вызывай `ardour__plugin_get_description` (изучи имена параметров, их реальные диапазоны min..max и единицы измерения) и проверяй пресеты/доки через Lua (`plug:get_info():get_presets(false)`, `plug:get_docs()`). Для незнакомых или продвинутых сторонних плагинов (Airwindows Consolidated, Surge XT / Effects, Dexed, Neural Amp Modeler, TDR Nova / Kotelnikov / SlickEQ / Molotok, Dragonfly Reverb, TAL-Reverb/Chorus/NoiseMaker, TSE BOD, LoudMax) используй `studio_web_search` / `studio_fetch_webpage`, чтобы узнать назначение ручек и оптимальные настройки («sweet spots»).
+   - **Экономь шаги — настройку параметров делай пакетом:** после `ardour__plugin_get_description` используй **`studio_set_plugin_parameters`**, чтобы выставить все нужные ручки плагина за **один вызов** вместо десятков одиночных вызовов! Это позволяет успеть полностью написать MIDI/аудио, свести и экспортировать WAV.
    - **Изучай звуки и инструменты:** просматривай библиотеку через `studio_inspect_sound_library` (SoundFonts `.sf2`, WAV-сэмплы, `.nam` модели усилителей), проверяй референсы и сэмплы через `studio_analyze_audio` (BPM, тональность, LUFS, 7-полосный спектр, транзиенты) и таймкоды вокала (`studio_align_vocal_lyrics`).
 3. **План работы:** в начале сложной задачи всегда вызывай `studio_update_plan`, чтобы пользователь видел живой прогресс.
 4. **Плагины и Web Search:** сначала проверяй реально установленные плагины через `ardour__plugin_list_available`. Если не хватает важного инструмента/эффекта (например, редкого синтезатора или специфической обработки), найди лучший актуальный вариант через `studio_web_search` и отправь карточку через `studio_request_plugin_install` с понятной инструкцией для Windows (папка `BUILD\\lib\\ardour9\\VST3` или `%LOCALAPPDATA%\\Programs\\Common\\VST3`).
@@ -343,10 +450,11 @@ class AIProducerAgent:
 ```
 """
 
-    async def _collect_tools(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
-        """Combine studio tools + dynamically discovered Ardour MCP tools."""
+    async def _collect_tools(self) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, dict[str, Any]]]:
+        """Combine studio tools + sanitized Ardour MCP tool schemas."""
         tools: list[dict[str, Any]] = list(STUDIO_NATIVE_TOOLS)
         ardour_map: dict[str, str] = {}
+        raw_schemas: dict[str, dict[str, Any]] = {}
 
         try:
             mcp_tools = await self.mcp.list_tools()
@@ -356,25 +464,27 @@ class AIProducerAgent:
                     continue
                 fn_name = f"ardour__{_sanitize_tool_name(orig_name)}"
                 ardour_map[fn_name] = orig_name
-                schema = t.get("inputSchema") or {"type": "object", "properties": {}}
+                raw_schema = copy.deepcopy(t.get("inputSchema") or {"type": "object", "properties": {}})
+                raw_schemas[fn_name] = raw_schema
                 tools.append({
                     "type": "function",
                     "function": {
                         "name": fn_name,
                         "description": f"[Ardour DAW] {t.get('description') or t.get('title') or orig_name}",
-                        "parameters": schema,
+                        "parameters": _sanitize_schema_for_llm(raw_schema),
                     },
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOGGER.warning("MCP list_tools failed during _collect_tools: %s", exc)
 
-        return tools, ardour_map
+        return tools, ardour_map, raw_schemas
 
     async def _execute_tool(
         self,
         fn_name: str,
         args: dict[str, Any],
         ardour_map: dict[str, str],
+        raw_schemas: dict[str, dict[str, Any]],
         plugin_cards_out: list[PluginInstallCard],
         plan_out: list[PlanStep],
         emit: Any,
@@ -473,6 +583,40 @@ class AIProducerAgent:
             )
             return True, res
 
+        if fn_name == "studio_set_plugin_parameters":
+            route_id = str(args.get("route_id", "")).strip()
+            try:
+                plugin_idx = int(args.get("plugin_index", 0))
+            except Exception:
+                return False, {"error": f"Invalid plugin_index: {args.get('plugin_index')}"}
+            params_list = args.get("parameters") or []
+            if not route_id or not isinstance(params_list, list) or not params_list:
+                return False, {"error": "Provide route_id, plugin_index, and non-empty parameters array."}
+            results: list[dict[str, Any]] = []
+            errors: list[dict[str, Any]] = []
+            for p_item in params_list:
+                if not isinstance(p_item, dict):
+                    continue
+                try:
+                    p_idx = int(p_item.get("parameter_index"))
+                    val = float(p_item.get("value"))
+                    r = await self.mcp.call_tool(
+                        "plugin_set_parameter_by_index_value",
+                        {"id": route_id, "pluginIndex": plugin_idx, "parameterIndex": p_idx, "value": val},
+                    )
+                    st = r.get("structured", {})
+                    results.append({"parameterIndex": p_idx, "value": val, "label": st.get("label", ""), "ok": True})
+                except Exception as exc:
+                    errors.append({"parameterIndex": p_item.get("parameter_index"), "error": str(exc)})
+            return len(errors) == 0, {
+                "route_id": route_id,
+                "plugin_index": plugin_idx,
+                "applied": len(results),
+                "failed": len(errors),
+                "results": results[:30],
+                "errors": errors[:10],
+            }
+
         if fn_name == "studio_request_plugin_install":
             card = PluginInstallCard(
                 id=f"plug_{uuid.uuid4().hex[:8]}",
@@ -481,7 +625,7 @@ class AIProducerAgent:
                 price_type=str(args.get("price_type", "Free")),
                 purpose=str(args.get("purpose", "")),
                 download_url=str(args.get("download_url", "")),
-                install_path_windows=str(args.get("install_path_windows", r"C:\Program Files\Common Files\VST3")),
+                install_path_windows=str(args.get("install_path_windows", r"C:\Users\Admin\Desktop\FL Radio\BUILD\lib\ardour9\VST3")),
                 steps=[str(x) for x in (args.get("steps") or [])],
                 alternatives=[str(x) for x in (args.get("alternatives") or [])],
                 status="pending",
@@ -496,8 +640,9 @@ class AIProducerAgent:
 
         if fn_name in ardour_map:
             mcp_name = ardour_map[fn_name]
+            coerced = _coerce_args_to_schema(args, raw_schemas.get(fn_name))
             try:
-                res = await self.mcp.call_tool(mcp_name, args)
+                res = await self.mcp.call_tool(mcp_name, coerced)
                 return True, res.get("structured", res)
             except Exception as exc:
                 return False, {"error": str(exc)}
@@ -554,9 +699,14 @@ class AIProducerAgent:
                 self.storage.append_message(user_msg_obj)
                 await emit({"type": "user_saved", "message": user_msg_obj.model_dump()})
 
+                async def on_status_cb(status_text: str) -> None:
+                    await emit({"type": "status", "text": status_text})
+
+                self.mcp.set_runtime_hooks(on_status=on_status_cb, cancel_event=self._cancel_event)
+
                 await emit({"type": "status", "text": "Подключаюсь к движку Ardour и собираю контекст..."})
                 session_ctx = await self.mcp.get_session_snapshot_context()
-                tools, ardour_map = await self._collect_tools()
+                tools, ardour_map, raw_schemas = await self._collect_tools()
                 system_prompt = self._build_system_prompt(mode, session_ctx)
 
                 # Build conversation history (last 18 messages for bounded context)
@@ -576,22 +726,35 @@ class AIProducerAgent:
                 snapshot_taken: Optional[str] = None
                 mutating_done = False
                 consecutive_errors: dict[str, int] = {}
+                max_reconnects = max(1, min(int(getattr(settings, "max_reconnects", 10) or 10), 20))
+                hit_step_limit = False
 
                 for step_idx in range(settings.max_agent_steps):
                     if self._cancel_event.is_set():
                         await emit({"type": "status", "text": "Остановлено пользователем."})
                         break
 
-                    await emit({"type": "status", "text": f"Думаю ({provider.model}) — шаг {step_idx + 1}..."})
+                    await emit({"type": "status", "text": f"Думаю ({provider.model}) — шаг {step_idx + 1}/{settings.max_agent_steps}..."})
+
+                    step_tokens: list[str] = []
 
                     async def on_tok(tok: str) -> None:
+                        step_tokens.append(tok)
                         await emit({"type": "token", "text": tok})
+
+                    async def on_reset() -> None:
+                        step_tokens.clear()
+                        await emit({"type": "retry_reset"})
 
                     resp = await stream_chat_completion(
                         provider=provider,
                         messages=llm_messages,
                         tools=tools,
                         on_token=on_tok,
+                        on_status=on_status_cb,
+                        on_reset=on_reset,
+                        max_reconnects=max_reconnects,
+                        cancel_event=self._cancel_event,
                     )
 
                     text_piece = resp.get("content", "")
@@ -602,13 +765,13 @@ class AIProducerAgent:
                     if not tool_calls:
                         break
 
-                    # Record assistant message with tool calls
+                    # Record assistant message with tool calls (avoid content: null for proxy compat)
                     if resp.get("used_react_fallback"):
-                        llm_messages.append({"role": "assistant", "content": text_piece})
+                        llm_messages.append({"role": "assistant", "content": text_piece or ""})
                     else:
                         llm_messages.append({
                             "role": "assistant",
-                            "content": text_piece or None,
+                            "content": text_piece or "",
                             "tool_calls": tool_calls,
                         })
 
@@ -647,7 +810,7 @@ class AIProducerAgent:
                         })
                         t0 = time.perf_counter()
                         ok, result_obj = await self._execute_tool(
-                            fn_name, fn_args, ardour_map, plugin_cards, current_plan, emit
+                            fn_name, fn_args, ardour_map, raw_schemas, plugin_cards, current_plan, emit
                         )
                         dur_ms = int((time.perf_counter() - t0) * 1000)
 
@@ -694,12 +857,54 @@ class AIProducerAgent:
                             paused_for_plugin = True
 
                     if paused_for_plugin:
-                        # Give LLM one final summarizing turn explaining the plugin card, then wait for user
                         continue
+
+                    if step_idx == settings.max_agent_steps - 1 and not self._cancel_event.is_set():
+                        hit_step_limit = True
+
+                # If step limit reached right after executing tools, ask LLM for a clean status summary
+                if hit_step_limit and not self._cancel_event.is_set():
+                    try:
+                        await emit({"type": "status", "text": "Достигнут лимит шагов — формирую отчёт..."})
+                        llm_messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[SYSTEM]: Достигнут лимит шагов агента ({settings.max_agent_steps}). "
+                                "НЕ вызывай инструменты. Честно и кратко перечисли пользователю, что уже сделано в сессии, "
+                                "что ещё не успели сделать (например, экспорт WAV / MIDI), и предложи написать «продолжай» для завершения."
+                            ),
+                        })
+
+                        async def on_wrap_tok(tok: str) -> None:
+                            await emit({"type": "token", "text": tok})
+
+                        async def on_wrap_reset() -> None:
+                            await emit({"type": "retry_reset"})
+
+                        wrap = await stream_chat_completion(
+                            provider=provider,
+                            messages=llm_messages,
+                            tools=None,
+                            on_token=on_wrap_tok,
+                            on_status=on_status_cb,
+                            on_reset=on_wrap_reset,
+                            max_reconnects=max_reconnects,
+                            cancel_event=self._cancel_event,
+                        )
+                        if wrap.get("content"):
+                            assistant_full_text_parts.append(wrap["content"])
+                    except Exception as wrap_exc:
+                        _LOGGER.warning("Wrap-up summary call failed: %s", wrap_exc)
 
                 final_text = "\n\n".join(p.strip() for p in assistant_full_text_parts if p.strip())
                 if not final_text and tool_traces:
-                    final_text = f"Готово! Выполнено действий с движком: {len(tool_traces)}."
+                    if hit_step_limit:
+                        final_text = (
+                            f"Достигнут лимит шагов ({settings.max_agent_steps}): выполнено {len(tool_traces)} действий, "
+                            "но задача ещё не завершена до конца. Напишите «продолжай» (или увеличьте «Макс. шагов агента» во вкладке Провайдеры)."
+                        )
+                    else:
+                        final_text = f"Готово! Выполнено действий с движком: {len(tool_traces)}."
 
                 assistant_msg = ChatMessage(
                     id=f"msg_{uuid.uuid4().hex[:10]}",
@@ -713,8 +918,19 @@ class AIProducerAgent:
                 self.storage.append_message(assistant_msg)
                 await emit({"type": "done", "message": assistant_msg.model_dump()})
             except Exception as exc:
+                _LOGGER.exception("Agent worker failed: %s", exc)
+                err_msg = ChatMessage(
+                    id=f"msg_{uuid.uuid4().hex[:10]}",
+                    role="assistant",
+                    content=f"**Ошибка выполнения:** {exc}",
+                    tool_calls=locals().get("tool_traces", []),
+                    plugin_cards=locals().get("plugin_cards", []),
+                    plan_snapshot=locals().get("current_plan", []),
+                )
+                self.storage.append_message(err_msg)
                 await emit({"type": "error", "message": str(exc)})
             finally:
+                self.mcp.set_runtime_hooks(None, None)
                 self._running = False
                 await queue.put(None)
 

@@ -342,11 +342,34 @@ def test_full_agent_and_api_end_to_end() -> None:
 
 
 def test_sound_library_and_mastery_skill() -> None:
-    from ai_music_studio.agent import STUDIO_NATIVE_TOOLS
+    from ai_music_studio.agent import (
+        STUDIO_NATIVE_TOOLS,
+        _coerce_args_to_schema,
+        _sanitize_schema_for_llm,
+    )
     from ai_music_studio.sound_library import inspect_sound_library
 
     tool_names = {t["function"]["name"] for t in STUDIO_NATIVE_TOOLS}
     assert "studio_inspect_sound_library" in tool_names
+    assert "studio_set_plugin_parameters" in tool_names
+
+    raw_schema = {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "pluginIndex": {"type": "integer"},
+            "value": {"type": "number"},
+            "enabled": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    }
+    sanitized = _sanitize_schema_for_llm(raw_schema)
+    assert "additionalProperties" not in sanitized
+    coerced = _coerce_args_to_schema(
+        {"id": 302, "pluginIndex": "1", "value": "-3.5", "enabled": "true", "reason": "hallucinated"},
+        raw_schema,
+    )
+    assert coerced == {"id": "302", "pluginIndex": 1, "value": -3.5, "enabled": True}
 
     lib = inspect_sound_library(category="all", limit=10)
     assert "soundfonts_count" in lib and "total_audio_samples" in lib
@@ -356,7 +379,100 @@ def test_sound_library_and_mastery_skill() -> None:
         skills = {s.id: s for s in st.list_skills()}
         assert "plugin_sound_mastery" in skills
         assert skills["plugin_sound_mastery"].enabled is True
-    print(f"[PASS] Sound library ({lib['soundfonts_count']} sf2, {lib['nam_models_count']} nam, {lib['total_audio_samples']} samples) & mastery skill")
+    print(f"[PASS] Sound library ({lib['soundfonts_count']} sf2, {lib['nam_models_count']} nam, {lib['total_audio_samples']} samples), mastery skill & schema coercion")
+
+
+def test_ten_reconnects_llm_and_mcp() -> None:
+    import asyncio
+    from ai_music_studio import llm_client, mcp_client
+
+    llm_attempts = {"n": 0}
+    mcp_call_attempts = {"n": 0}
+    status_msgs: list[str] = []
+
+    class FlakyHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+        def do_POST(self) -> None:
+            n_read = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n_read).decode("utf-8") if n_read else "{}"
+            body = json.loads(raw)
+
+            if self.path.endswith("/chat/completions"):
+                llm_attempts["n"] += 1
+                if llm_attempts["n"] <= 10:
+                    self.send_response(503)
+                    self.end_headers()
+                    self.wfile.write(b"Temporary overload")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"choices": [{"message": {"content": "Reconnected OK"}}]}).encode("utf-8"))
+                return
+
+            if self.path == "/mcp":
+                method = body.get("method")
+                if method == "initialize":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": {"serverInfo": {"name": "flaky"}}}).encode("utf-8"))
+                    return
+                mcp_call_attempts["n"] += 1
+                if mcp_call_attempts["n"] <= 10:
+                    self.send_response(503)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": {"content": [{"type": "text", "text": json.dumps({"ok": True})}], "isError": False},
+                }).encode("utf-8"))
+
+    port = _free_port()
+    srv = HTTPServer(("127.0.0.1", port), FlakyHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    orig_sleep = asyncio.sleep
+
+    async def fast_sleep(_delay: float) -> None:
+        await orig_sleep(0.001)
+
+    asyncio.sleep = fast_sleep
+    try:
+        async def run_checks() -> None:
+            prov = ProviderConfig(id="p", name="Flaky", base_url=f"http://127.0.0.1:{port}/v1", model="m")
+
+            async def on_st(s: str) -> None:
+                status_msgs.append(s)
+
+            res = await llm_client.stream_chat_completion(
+                prov,
+                [{"role": "user", "content": "hi"}],
+                on_status=on_st,
+                max_reconnects=10,
+            )
+            assert res["content"] == "Reconnected OK"
+            assert res["reconnects_used"] == 10
+
+            mc = mcp_client.ArdourMCPClient(f"http://127.0.0.1:{port}/mcp")
+            mc.set_runtime_hooks(on_status=on_st)
+            mres = await mc.call_tool("session_get_info", {}, max_reconnects=10)
+            assert mres["ok"] is True
+
+        asyncio.run(run_checks())
+        assert llm_attempts["n"] == 11
+        assert mcp_call_attempts["n"] == 11
+        assert any("реконнект 10/10" in s for s in status_msgs)
+        print("[PASS] 10x auto-reconnect verified for both LLM API and Ardour MCP")
+    finally:
+        asyncio.sleep = orig_sleep
+        srv.shutdown()
 
 
 if __name__ == "__main__":
@@ -364,5 +480,6 @@ if __name__ == "__main__":
     test_audio_dsp_and_alignment()
     test_react_parser()
     test_sound_library_and_mastery_skill()
+    test_ten_reconnects_llm_and_mcp()
     test_full_agent_and_api_end_to_end()
-    print("\nALL STAGE 1-5 VERIFICATION TESTS PASSED!")
+    print("\nALL STAGE 1-6 VERIFICATION TESTS PASSED!")

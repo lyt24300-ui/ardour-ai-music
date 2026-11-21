@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import uuid
 from pathlib import Path
@@ -17,7 +18,7 @@ from pydantic import BaseModel
 
 from .agent import AIProducerAgent
 from .audio_analyzer import align_vocal_with_lyrics, analyze_audio_file
-from .config import STATIC_DIR, ensure_dirs
+from .config import DATA_DIR, STATIC_DIR, ensure_dirs
 from .llm_client import list_provider_models, test_provider_connection
 from .mcp_client import ArdourMCPClient
 from .models import (
@@ -31,6 +32,13 @@ from .theme_loader import list_ardour_themes, load_ardour_theme
 from .web_search import web_search
 
 ensure_dirs()
+
+_studio_logger = logging.getLogger("ai_music_studio")
+if not _studio_logger.handlers:
+    _studio_logger.setLevel(logging.INFO)
+    _fh = logging.FileHandler(DATA_DIR / "studio.log", encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    _studio_logger.addHandler(_fh)
 
 storage = StudioStorage()
 settings_init = storage.get_settings()
@@ -136,7 +144,13 @@ async def api_save_settings(payload: StudioSettings) -> StudioSettings:
 @app.get("/api/ardour/status")
 async def api_ardour_status() -> dict[str, Any]:
     mcp_client.set_url(storage.get_settings().ardour_mcp_url)
-    return await mcp_client.check_connection()
+    return await mcp_client.check_connection(max_reconnects=1)
+
+
+@app.post("/api/ardour/reconnect")
+async def api_ardour_reconnect(max_reconnects: int = 10) -> dict[str, Any]:
+    mcp_client.set_url(storage.get_settings().ardour_mcp_url)
+    return await mcp_client.check_connection(max_reconnects=max(1, min(max_reconnects, 10)))
 
 
 @app.get("/api/ardour/tools")

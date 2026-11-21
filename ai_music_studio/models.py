@@ -38,7 +38,8 @@ class StudioSettings(BaseModel):
     theme_name: str = "dark"
     autonomy_mode: Literal["autonomous", "step_by_step"] = "autonomous"
     auto_snapshot: bool = True
-    max_agent_steps: int = Field(default=35, ge=3, le=100)
+    max_agent_steps: int = Field(default=60, ge=3, le=250)
+    max_reconnects: int = Field(default=10, ge=1, le=20)
     whisper_model: str = "base"
     whisper_enabled: bool = True
     whisper_language: str = ""  # empty = auto-detect

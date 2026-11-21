@@ -57,13 +57,36 @@
     return `<p>${text}</p>`;
   }
 
-  async function api(path, opts = {}) {
-    const resp = await fetch(path, opts);
-    if (!resp.ok) {
-      const txt = await resp.text();
-      throw new Error(txt || `HTTP ${resp.status}`);
+  const MAX_RECONNECTS = 10;
+
+  async function api(path, opts = {}, maxReconnects = MAX_RECONNECTS) {
+    const method = String((opts && opts.method) || "GET").toUpperCase();
+    const retryableMethod = method === "GET" || path.includes("/status") || path.includes("/reconnect") || path.includes("/health");
+    const retries = retryableMethod ? maxReconnects : 2;
+    let lastErr;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const resp = await fetch(path, opts);
+        if ((resp.status === 502 || resp.status === 503 || resp.status === 504) && attempt < retries) {
+          await new Promise((r) => setTimeout(r, Math.min(3000, 400 * Math.pow(1.4, attempt))));
+          continue;
+        }
+        if (!resp.ok) {
+          const txt = await resp.text();
+          throw new Error(txt || `HTTP ${resp.status}`);
+        }
+        return await resp.json();
+      } catch (err) {
+        lastErr = err;
+        const isNet = err && (err.name === "TypeError" || String(err.message || "").includes("Failed to fetch"));
+        if (isNet && attempt < retries) {
+          await new Promise((r) => setTimeout(r, Math.min(3000, 450 * Math.pow(1.4, attempt))));
+          continue;
+        }
+        throw err;
+      }
     }
-    return resp.json();
+    throw lastErr;
   }
 
   // ---------- Theme Sync (Ardour XML .colors) ----------
@@ -85,12 +108,16 @@
   }
 
   // ---------- Ardour Engine Status ----------
-  async function refreshArdourStatus() {
+  let ardourAutoReconnectBusy = false;
+
+  async function refreshArdourStatus(allowAutoReconnect = false) {
     const lcd = $("#ardourLcd");
     const led = $("#ardourLed");
     const txt = $("#ardourLcdText");
     try {
-      const st = await api("/api/ardour/status");
+      const st = await api(allowAutoReconnect ? "/api/ardour/reconnect?max_reconnects=10" : "/api/ardour/status", {
+        method: allowAutoReconnect ? "POST" : "GET",
+      });
       state.ardour = st;
       if (st.connected) {
         lcd.classList.remove("disconnected");
@@ -107,7 +134,22 @@
     } catch {
       lcd.classList.add("disconnected");
       led.className = "led red";
-      txt.textContent = "Ardour MCP: офлайн";
+      txt.textContent = "Сервер Studio: переподключение...";
+      if (!ardourAutoReconnectBusy) {
+        ardourAutoReconnectBusy = true;
+        for (let a = 1; a <= MAX_RECONNECTS; a++) {
+          txt.textContent = `Studio реконнект (${a}/${MAX_RECONNECTS})...`;
+          await new Promise((r) => setTimeout(r, 1200));
+          try {
+            const st2 = await api("/api/ardour/status", {}, 0);
+            state.ardour = st2;
+            ardourAutoReconnectBusy = false;
+            return refreshArdourStatus(false);
+          } catch {}
+        }
+        ardourAutoReconnectBusy = false;
+        txt.textContent = "Ardour MCP: офлайн";
+      }
     }
   }
 
@@ -504,7 +546,8 @@
     state.settings = s;
     $("#modeSelect").value = s.autonomy_mode || "autonomous";
     $("#setMcpUrl").value = s.ardour_mcp_url || "http://127.0.0.1:4820/mcp";
-    $("#setMaxSteps").value = s.max_agent_steps || 35;
+    $("#setMaxSteps").value = s.max_agent_steps || 60;
+    if ($("#setMaxReconnects")) $("#setMaxReconnects").value = s.max_reconnects || 10;
     $("#setSearchProvider").value = (s.web_search && s.web_search.provider) || "duckduckgo";
     $("#setSearchKey").value = (s.web_search && (s.web_search.api_key || s.web_search.base_url)) || "";
     $("#setSearchEnabled").checked = !s.web_search || s.web_search.enabled !== false;
@@ -537,8 +580,10 @@
     const bar = $("#planBar");
     if (!state.plan.length) {
       bar.style.display = "none";
+      updateScrollBottomBtn();
       return;
     }
+    const stick = isChatNearBottom();
     bar.style.display = "block";
     const done = state.plan.filter((s) => s.status === "done").length;
     $("#planProgressText").textContent = `${done}/${state.plan.length}`;
@@ -548,6 +593,7 @@
         return `<div class="plan-step ${s.status}" title="${escHtml(s.detail || "")}"><span class="led ${led}"></span><span>${escHtml(s.title)}</span></div>`;
       })
       .join("");
+    scrollChatToBottom(stick);
   }
 
   function renderPluginCardEl(card) {
@@ -641,6 +687,7 @@
           `).join("")}
         </div>
       `;
+      det.addEventListener("toggle", () => updateScrollBottomBtn());
       el.appendChild(det);
     }
     return el;
@@ -785,6 +832,7 @@
 
     let accText = "";
     let toolCount = 0;
+    let streamCompleted = false;
 
     try {
       const resp = await fetch("/api/chat/stream", {
@@ -822,6 +870,9 @@
 
           if (ev.type === "status") {
             $("#agentStatusText").textContent = ev.text;
+          } else if (ev.type === "retry_reset") {
+            accText = "";
+            liveEl.querySelector(".live-body").innerHTML = "";
           } else if (ev.type === "token") {
             const stick = isChatNearBottom();
             accText += ev.text;
@@ -858,9 +909,11 @@
           } else if (ev.type === "lyrics_updated") {
             refreshLyrics();
           } else if (ev.type === "error") {
+            streamCompleted = true;
             liveEl.querySelector(".live-body").innerHTML += `<p style="color:var(--ardour-alert-red);"><strong>Ошибка:</strong> ${escHtml(ev.message)}</p>`;
             toast("Ошибка: " + ev.message, 4500);
           } else if (ev.type === "done") {
+            streamCompleted = true;
             const st = await api("/api/chat/state");
             state.messages = st.messages;
             renderPlan(st.plan);
@@ -869,13 +922,50 @@
           }
         }
       }
+
+      if (!streamCompleted) {
+        for (let rAttempt = 1; rAttempt <= MAX_RECONNECTS; rAttempt++) {
+          $("#agentStatusText").textContent = `Поток прерван — переподключение (${rAttempt}/${MAX_RECONNECTS})...`;
+          await new Promise((r) => setTimeout(r, Math.min(4000, 900 * rAttempt)));
+          try {
+            const st = await api("/api/chat/state", {}, 1);
+            state.messages = st.messages || state.messages;
+            renderPlan(st.plan || []);
+            if (!st.running) {
+              renderChatFeed();
+              refreshArdourStatus();
+              streamCompleted = true;
+              break;
+            }
+          } catch {}
+        }
+      }
     } catch (err) {
-      liveEl.querySelector(".live-body").innerHTML += `<p style="color:var(--ardour-alert-red);"><strong>Ошибка соединения:</strong> ${escHtml(err.message)}</p>`;
+      let recovered = false;
+      for (let rAttempt = 1; rAttempt <= MAX_RECONNECTS; rAttempt++) {
+        $("#agentStatusText").textContent = `Реконнект к чату (${rAttempt}/${MAX_RECONNECTS})...`;
+        await new Promise((r) => setTimeout(r, Math.min(4000, 900 * rAttempt)));
+        try {
+          const st = await api("/api/chat/state", {}, 1);
+          state.messages = st.messages || state.messages;
+          renderPlan(st.plan || []);
+          if (!st.running) {
+            renderChatFeed();
+            refreshArdourStatus();
+            recovered = true;
+            break;
+          }
+        } catch {}
+      }
+      if (!recovered) {
+        liveEl.querySelector(".live-body").innerHTML += `<p style="color:var(--ardour-alert-red);"><strong>Ошибка соединения (после ${MAX_RECONNECTS} реконнектов):</strong> ${escHtml(err.message)}</p>`;
+      }
     } finally {
       state.streaming = false;
       $("#btnSend").style.display = "inline-flex";
       $("#btnStop").style.display = "none";
       $("#agentStatusText").textContent = "Готов к работе";
+      updateScrollBottomBtn();
     }
   }
 
@@ -940,7 +1030,7 @@
       toast(`Тема Ardour: ${tid}`);
     });
 
-    $("#btnRefreshArdour").addEventListener("click", refreshArdourStatus);
+    $("#btnRefreshArdour").addEventListener("click", () => refreshArdourStatus(true));
 
     $("#chatFeed").addEventListener("scroll", updateScrollBottomBtn);
     $("#btnScrollBottom").addEventListener("click", () => {
@@ -1099,7 +1189,8 @@
         theme_name: $("#themeSelect").value || "dark",
         autonomy_mode: $("#modeSelect").value || "autonomous",
         auto_snapshot: $("#setAutoSnapshot").checked,
-        max_agent_steps: parseInt($("#setMaxSteps").value, 10) || 35,
+        max_agent_steps: parseInt($("#setMaxSteps").value, 10) || 60,
+        max_reconnects: $("#setMaxReconnects") ? (parseInt($("#setMaxReconnects").value, 10) || 10) : 10,
         whisper_model: $("#setWhisperModel").value || "base",
         whisper_enabled: $("#setWhisperEnabled").checked,
         whisper_language: $("#setWhisperLang").value.trim(),

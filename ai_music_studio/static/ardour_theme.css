@@ -187,6 +187,8 @@ html, body {
   font-family: var(--font-ui);
   font-size: 12px;
   outline: none;
+  max-width: 100%;
+  min-width: 0;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.55);
 }
 .ardour-input:focus,
@@ -220,9 +222,11 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  height: 44px;
-  padding: 4px 8px;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  min-height: 44px;
+  height: auto;
+  padding: 5px 8px;
   background: var(--ardour-bg-panel);
   border-bottom: 1px solid var(--ardour-border);
   flex-shrink: 0;
@@ -232,7 +236,13 @@ html, body {
 .top-right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
+}
+.top-bar .ardour-select {
+  max-width: 195px;
+  text-overflow: ellipsis;
 }
 
 .brand-badge {
@@ -366,10 +376,20 @@ html, body {
 .tab-panel.active {
   display: flex;
 }
+.tab-panel > * {
+  flex-shrink: 0;
+}
 .asset-list {
   display: flex;
   flex-direction: column;
   gap: 7px;
+}
+.asset-list > * {
+  flex-shrink: 0;
+}
+#lyricsAlignedWrap {
+  overflow-x: auto;
+  max-width: 100%;
 }
 
 /* ---------- Drop Zone & Asset Cards (Audio Track Strip look) ---------- */
@@ -620,13 +640,14 @@ html, body {
 }
 .field-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 6px;
 }
 .field {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 .field label {
   font-size: 11px;
@@ -678,6 +699,8 @@ html, body {
   flex-wrap: wrap;
   gap: 5px;
   margin-top: 6px;
+  max-height: 148px;
+  overflow-y: auto;
 }
 .plan-step {
   display: inline-flex;
@@ -823,6 +846,23 @@ html, body {
 }
 .msg-body a {
   color: var(--ardour-selection);
+}
+.msg-body table {
+  border-collapse: collapse;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+  margin: 6px 0;
+  font-size: 11.5px;
+}
+.msg-body th,
+.msg-body td {
+  border: 1px solid var(--ardour-border);
+  padding: 4px 7px;
+  text-align: left;
+}
+.msg-body th {
+  background: var(--ardour-bg-dark);
 }
 
 /* Tool Execution Trace Accordion */
