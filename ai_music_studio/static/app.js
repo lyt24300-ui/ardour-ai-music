@@ -646,6 +646,30 @@
     return el;
   }
 
+  function isChatNearBottom() {
+    const feed = $("#chatFeed");
+    if (!feed) return true;
+    return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 70;
+  }
+
+  function updateScrollBottomBtn() {
+    const feed = $("#chatFeed");
+    const btn = $("#btnScrollBottom");
+    if (!feed || !btn) return;
+    const hasScroll = feed.scrollHeight - feed.clientHeight > 40;
+    const gap = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+    btn.style.display = hasScroll && gap > 50 ? "inline-flex" : "none";
+  }
+
+  function scrollChatToBottom(force = false) {
+    const feed = $("#chatFeed");
+    if (!feed) return;
+    if (force || isChatNearBottom()) {
+      feed.scrollTop = feed.scrollHeight;
+    }
+    updateScrollBottomBtn();
+  }
+
   function renderChatFeed() {
     const feed = $("#chatFeed");
     feed.innerHTML = "";
@@ -668,12 +692,14 @@
           $("#chatInput").focus();
         })
       );
+      updateScrollBottomBtn();
       return;
     }
     for (const m of state.messages) {
       feed.appendChild(createMessageEl(m));
     }
-    feed.scrollTop = feed.scrollHeight;
+    scrollChatToBottom(true);
+    requestAnimationFrame(() => scrollChatToBottom(true));
   }
 
   function renderContextPills() {
@@ -797,12 +823,14 @@
           if (ev.type === "status") {
             $("#agentStatusText").textContent = ev.text;
           } else if (ev.type === "token") {
+            const stick = isChatNearBottom();
             accText += ev.text;
             liveEl.querySelector(".live-body").innerHTML = renderMarkdown(accText);
-            feed.scrollTop = feed.scrollHeight;
+            scrollChatToBottom(stick);
           } else if (ev.type === "plan") {
             renderPlan(ev.steps);
           } else if (ev.type === "tool_start") {
+            const stick = isChatNearBottom();
             toolCount++;
             const log = liveEl.querySelector(".tool-log");
             log.style.display = "block";
@@ -812,16 +840,19 @@
             row.dataset.tid = ev.id;
             row.innerHTML = `<span class="led orange"></span><span class="tname">${escHtml(ev.tool_name)}</span><span class="tres">выполняется...</span>`;
             liveEl.querySelector(".live-tool-list").appendChild(row);
-            feed.scrollTop = feed.scrollHeight;
+            scrollChatToBottom(stick);
           } else if (ev.type === "tool_end") {
+            const stick = isChatNearBottom();
             const tr = ev.trace;
             const row = liveEl.querySelector(`.tool-row[data-tid="${tr.id}"]`);
             if (row) {
               row.innerHTML = `<span class="led ${tr.ok ? "green" : "red"}"></span><span class="tname">${escHtml(tr.tool_name)}</span><span class="tdur">${tr.duration_ms}ms</span><span class="tres" title="${escHtml(tr.result_summary)}">${escHtml(tr.result_summary)}</span>`;
             }
+            scrollChatToBottom(stick);
           } else if (ev.type === "plugin_card") {
+            const stick = isChatNearBottom();
             liveEl.querySelector(".live-cards").appendChild(renderPluginCardEl(ev.card));
-            feed.scrollTop = feed.scrollHeight;
+            scrollChatToBottom(stick);
           } else if (ev.type === "assets_updated") {
             refreshAssets();
           } else if (ev.type === "lyrics_updated") {
@@ -910,6 +941,12 @@
     });
 
     $("#btnRefreshArdour").addEventListener("click", refreshArdourStatus);
+
+    $("#chatFeed").addEventListener("scroll", updateScrollBottomBtn);
+    $("#btnScrollBottom").addEventListener("click", () => {
+      scrollChatToBottom(true);
+      $("#chatFeed").focus();
+    });
 
     $("#btnUndo").addEventListener("click", async () => {
       const res = await api("/api/ardour/undo", { method: "POST" });
