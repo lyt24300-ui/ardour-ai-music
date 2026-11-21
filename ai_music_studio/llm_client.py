@@ -277,9 +277,9 @@ async def _single_stream_attempt(
                     if fn.get("arguments"):
                         entry["function"]["arguments"] += fn["arguments"]
 
-            # Treat completely empty SSE stream (without DONE and without content/tools) as interrupted
-            if not saw_done and not content_chunks and not tool_calls_map and not (cancel_event and cancel_event.is_set()):
-                raise _RetryableStreamError("Пустой поток ответа от LLM (обрыв соединения)")
+            # Treat completely empty SSE stream (no text and no tool calls) as interrupted / retryable
+            if not content_chunks and not tool_calls_map and not (cancel_event and cancel_event.is_set()):
+                raise _RetryableStreamError("Модель вернула пустой поток ответа (0 токенов и 0 tool_calls)")
 
     full_text = "".join(content_chunks)
     tool_calls = [tool_calls_map[k] for k in sorted(tool_calls_map.keys())]

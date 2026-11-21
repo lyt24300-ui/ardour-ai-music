@@ -905,6 +905,11 @@ class AIProducerAgent:
                         )
                     else:
                         final_text = f"Готово! Выполнено действий с движком: {len(tool_traces)}."
+                elif not final_text and not self._cancel_event.is_set():
+                    final_text = (
+                        "⚠️ Модель вернула пустой ответ без текста и вызова инструментов. "
+                        "Проверьте выбранного провайдера/модель и баланс/регион во вкладке «Провайдеры»."
+                    )
 
                 assistant_msg = ChatMessage(
                     id=f"msg_{uuid.uuid4().hex[:10]}",

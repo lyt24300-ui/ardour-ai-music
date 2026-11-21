@@ -1033,6 +1033,9 @@
     $("#btnRefreshArdour").addEventListener("click", () => refreshArdourStatus(true));
 
     $("#chatFeed").addEventListener("scroll", updateScrollBottomBtn);
+    window.addEventListener("scroll", () => {
+      if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+    });
     $("#btnScrollBottom").addEventListener("click", () => {
       scrollChatToBottom(true);
       $("#chatFeed").focus();

@@ -61,7 +61,10 @@
 html, body {
   width: 100%;
   height: 100%;
+  margin: 0;
+  padding: 0;
   overflow: hidden;
+  overscroll-behavior: none;
   background: var(--ardour-bg);
   color: var(--ardour-fg);
   font-family: var(--font-ui);
@@ -71,22 +74,23 @@ html, body {
   user-select: none;
 }
 
-/* Ardour 10px flat scrollbars (clearlooks.rc.in: slider-width = 10) */
+/* Ardour 12px flat scrollbars (clearlooks.rc.in style, always easy to grab) */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--ardour-bg-dark);
+  background: #171717;
   border-left: 1px solid var(--ardour-border);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--ardour-fg-muted);
-  border: 1px solid var(--ardour-border);
-  border-radius: 2px;
+  background: #626262;
+  border: 2px solid #171717;
+  border-radius: 3px;
+  min-height: 28px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--ardour-fg-secondary);
+  background: #888888;
 }
 
 /* ---------- Signature ArdourButton Widget ---------- */
@@ -208,10 +212,12 @@ html, body {
 
 /* ---------- Main Application Shell ---------- */
 .app-shell {
+  position: fixed;
+  inset: 0;
   display: flex;
   flex-direction: column;
   width: 100%;
-  height: 100vh;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   background: var(--ardour-bg);
@@ -293,8 +299,10 @@ html, body {
 /* ---------- Workspace Split (GtkPaned style) ---------- */
 .workspace {
   display: flex;
-  flex: 1;
+  flex: 1 1 0%;
+  height: 0;
   min-height: 0;
+  overflow: hidden;
   background: var(--ardour-bg);
 }
 
@@ -302,11 +310,13 @@ html, body {
   width: 470px;
   min-width: 340px;
   max-width: 660px;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: var(--ardour-bg-panel);
   border-right: 1px solid var(--ardour-border);
   min-height: 0;
+  overflow: hidden;
 }
 
 .pane-splitter {
@@ -322,6 +332,7 @@ html, body {
 
 /* Ardour Page Switch Tab Strip (Rec / Cue / Edit / Mix style) */
 .context-tabs {
+  flex-shrink: 0;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 3px;
@@ -669,12 +680,14 @@ html, body {
 
 /* ---------- Right Pane: AI Producer Chat ---------- */
 .chat-pane {
-  flex: 1;
+  flex: 1 1 0%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   position: relative;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   background: var(--ardour-bg-track);
 }
 
@@ -727,14 +740,17 @@ html, body {
   position: relative;
   flex: 1 1 0%;
   min-height: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
 .chat-feed {
   flex: 1 1 0%;
   min-height: 0;
-  overflow-y: auto;
+  height: 100%;
+  overflow-y: scroll;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
   padding: 12px 14px;
   display: flex;
   flex-direction: column;

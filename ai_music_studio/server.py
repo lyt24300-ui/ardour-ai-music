@@ -57,6 +57,28 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.middleware("http")
+async def _no_stale_ui_cache(request: Any, call_next: Any) -> Any:
+    resp = await call_next(request)
+    p = str(getattr(request.url, "path", ""))
+    if p == "/" or p.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+def _static_version_token() -> str:
+    try:
+        mtimes = [
+            int((STATIC_DIR / fn).stat().st_mtime)
+            for fn in ("ardour_theme.css", "app.js", "index.html")
+            if (STATIC_DIR / fn).exists()
+        ]
+        return str(max(mtimes) if mtimes else 1)
+    except Exception:
+        return "1"
+
+
 def _focus_studio_window() -> bool:
     """Bring the standalone AI Music Studio window to foreground on Windows."""
     if sys.platform != "win32":
@@ -97,7 +119,14 @@ async def index_page() -> HTMLResponse:
     idx = STATIC_DIR / "index.html"
     if not idx.exists():
         return HTMLResponse("<h1>AI Music Studio UI missing</h1>", status_code=500)
-    return HTMLResponse(idx.read_text(encoding="utf-8"))
+    v = _static_version_token()
+    html = idx.read_text(encoding="utf-8")
+    html = html.replace('/static/ardour_theme.css"', f'/static/ardour_theme.css?v={v}"')
+    html = html.replace('/static/app.js"', f'/static/app.js?v={v}"')
+    return HTMLResponse(
+        html,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 @app.get("/api/health")
