@@ -4,10 +4,75 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
+import re
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+
+from .config import WORKSPACE_ROOT
+
+
+def _discover_soundfonts() -> list[str]:
+    """Locate installed .sf2/.sf3 SoundFont banks on this machine."""
+    search_dirs: list[Path] = [
+        WORKSPACE_ROOT / "share" / "ardour9" / "soundfonts",
+        Path.home() / "Documents" / "SoundFonts",
+        Path.home() / ".lv2",
+        WORKSPACE_ROOT / "lib" / "ardour9" / "LV2",
+    ]
+    data_env = os.environ.get("ARDOUR_DATA_PATH", "")
+    for part in data_env.split(os.pathsep):
+        if part.strip():
+            search_dirs.append(Path(part.strip()) / "soundfonts")
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        search_dirs.append(Path(appdata) / "LV2")
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        for ext in ("*.sf2", "*.sf3", "*.SF2", "*.SF3"):
+            for f in d.rglob(ext):
+                key = str(f.resolve()).lower()
+                if key not in seen:
+                    seen.add(key)
+                    found.append(str(f))
+    return found
+
+
+def _discover_fluidsynth_presets() -> list[str]:
+    """Locate LV2 preset labels registered for urn:ardour:a-fluidsynth."""
+    lv2_dirs: list[Path] = [
+        WORKSPACE_ROOT / "lib" / "ardour9" / "LV2",
+        Path.home() / ".lv2",
+    ]
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        lv2_dirs.append(Path(appdata) / "LV2")
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    label_re = re.compile(r'rdfs:label\s+"([^"]+)"')
+    for base in lv2_dirs:
+        if not base.is_dir():
+            continue
+        for ttl in base.glob("*.lv2/manifest.ttl"):
+            try:
+                txt = ttl.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if "urn:ardour:a-fluidsynth" in txt and "pset:Preset" in txt:
+                for m in label_re.finditer(txt):
+                    lbl = m.group(1).strip()
+                    if lbl and lbl not in seen:
+                        seen.add(lbl)
+                        labels.append(lbl)
+    return labels
 
 
 class ArdourMCPClient:
@@ -154,17 +219,21 @@ class ArdourMCPClient:
 
     async def get_session_snapshot_context(self) -> dict[str, Any]:
         """Gather compact live session state (info, tracks, markers, available plugins)."""
-        ctx: dict[str, Any] = {"connected": False}
+        ctx: dict[str, Any] = {
+            "connected": False,
+            "soundfonts": _discover_soundfonts(),
+            "fluid_synth_presets": _discover_fluidsynth_presets(),
+        }
         try:
             info = await self.call_tool("session_get_info", {})
             tracks = await self.call_tool("tracks_list", {})
             markers = await self.call_tool("markers_list", {})
-            ctx = {
+            ctx.update({
                 "connected": True,
                 "session": info.get("structured", {}),
                 "tracks": tracks.get("structured", {}),
                 "markers": markers.get("structured", {}),
-            }
+            })
             try:
                 master = await self.call_tool("master_get_info", {})
                 ctx["master"] = master.get("structured", {})

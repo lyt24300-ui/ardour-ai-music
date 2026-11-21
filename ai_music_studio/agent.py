@@ -271,6 +271,29 @@ class AIProducerAgent:
 4. **Плагины и Web Search:** сначала проверяй реально установленные плагины через `ardour__plugin_list_available`. Если не хватает важного инструмента/эффекта (например, качественного синта, автотюна, драм-машины или реверба), найди лучший актуальный вариант через `studio_web_search` и отправь карточку через `studio_request_plugin_install` с понятной инструкцией для Windows.
 5. **Безопасность:** если Ardour MCP не подключён (`connected: false`), честно сообщи об этом и предложи, что нужно сделать (открыть Ardour / включить MCPHttp), при этом всё равно можешь анализировать аудио, искать плагины и подготовить детальный план продакшна.
 
+## Критические правила по инструментам, SoundFont (.sf2) и Ardour Lua
+- **`ACE Fluid Synth` (`lv2:urn:ardour:a-fluidsynth`) НЕ имеет встроенных звуков!** Пока в него не загружен `.sf2` банк (SoundFont), он выдаёт полную тишину.
+- Проверяй `soundfonts` и `fluid_synth_presets` в разделе `Живое состояние Ardour DAW`:
+  - Если в `fluid_synth_presets` есть пресет (например `"GeneralUser GS"`), то **сразу после добавления `ACE Fluid Synth`** на MIDI-трек выполни **ровно один** вызов `ardour__lua_run_script` по этому проверенному шаблону (загружает `.sf2` и при необходимости выбирает GM-инструмент `0..127` на канале 1; для барабанов на 10-м канале Program Change не нужен):
+    ```lua
+    local r = Session:route_by_id(PBD.ID("<TRACK_ID>"))
+    local ins = r:nth_plugin(0):to_plugininsert()
+    local plug = ins:plugin(0)
+    local ps = plug:preset_by_label("GeneralUser GS")
+    if ps and ps.valid then plug:load_preset(ps) end
+    ARDOUR.LuaAPI.usleep(800000)
+    local parser = ARDOUR.RawMidiParser()
+    for _, b in ipairs({{0xB0, 0x00, 0x00, 0xB0, 0x20, 0x00, 0xC0, <PGM_0_127>}}) do
+      if parser:process_byte(b) then
+        ins:write_immediate_event(Evoral.EventType.MIDI_EVENT, parser:buffer_size(), parser:midi_buffer())
+      end
+    end
+    ```
+  - Частые GM-программы (`<PGM_0_127>`): `0`=Acoustic Grand Piano, `25`=Acoustic Steel Guitar, `27`=Clean Electric Guitar, `29`=Overdriven Guitar, `30`=Distortion Guitar, `33`=Electric Bass Finger, `38`=Synth Bass 1, `48`=Strings, `81`=Saw Lead.
+  - Если `soundfonts` и `fluid_synth_presets` **пусты** и сторонних VSTi нет — **НЕ вешай пустой `ACE Fluid Synth`!** Вызови `studio_request_plugin_install` (предложи `.sf2` или бесплатный VST3), либо по согласованию используй `ACE Reasonable Synth` (`lv2:https://community.ardour.org/node/7596`).
+- **Анти-зацикливание по `ardour__lua_run_script`:** НИКОГДА не гадай методы Lua API вслепую! В Ardour Lua **НЕТ** `Session:region_by_id`, `to_midi_track`, `Evoral.PatchChange`, `PatchChangePtr`, `MidiModel:new_patch_change_command`, `plug:get_presets()` (`get_presets` только у `plug:get_info():get_presets(false)`), `ins:load_preset()` (`load_preset` только у `plug = ins:plugin(0)`). Если инструмент ошибся 2 раза — СТОП, не подбирай API дальше.
+- **Обязательная проверка экспорта:** после `ardour__session_export_preview` всегда прогоняй итоговый WAV через `studio_analyze_audio` (`file_path=...`). Если `integrated_lufs < -60` или файл без сигнала — НЕ сдавай тишину, сперва почини синт/пресет/маршрутизацию и переэкспортируй!
+
 ## Активные Скиллы пользователя
 {skills_text}
 
@@ -526,6 +549,7 @@ class AIProducerAgent:
                 assistant_full_text_parts: list[str] = []
                 snapshot_taken: Optional[str] = None
                 mutating_done = False
+                consecutive_errors: dict[str, int] = {}
 
                 for step_idx in range(settings.max_agent_steps):
                     if self._cancel_event.is_set():
@@ -600,6 +624,18 @@ class AIProducerAgent:
                             fn_name, fn_args, ardour_map, plugin_cards, current_plan, emit
                         )
                         dur_ms = int((time.perf_counter() - t0) * 1000)
+
+                        if ok and not (isinstance(result_obj, dict) and result_obj.get("error")):
+                            consecutive_errors[fn_name] = 0
+                        else:
+                            consecutive_errors[fn_name] = consecutive_errors.get(fn_name, 0) + 1
+                            if isinstance(result_obj, dict) and consecutive_errors[fn_name] >= 2:
+                                result_obj = dict(result_obj)
+                                result_obj["_guard_warning"] = (
+                                    f"Tool '{fn_name}' failed {consecutive_errors[fn_name]} times in a row. "
+                                    "STOP guessing API methods! Use the verified Lua preset/MIDI snippets from your prompt, "
+                                    "standard MCP tools, studio_request_plugin_install, or report cleanly."
+                                )
 
                         result_json = json.dumps(result_obj, ensure_ascii=False)
                         summary = result_json[:280] + ("…" if len(result_json) > 280 else "")
