@@ -188,6 +188,15 @@ class StudioStorage:
             dst = self.skills_dir / src.name
             if not dst.exists():
                 shutil.copy2(src, dst)
+                continue
+            try:
+                cur = self._parse_skill_md(dst)
+                nxt = self._parse_skill_md(src)
+                if cur.builtin and cur.content.strip() != nxt.content.strip():
+                    nxt.enabled = cur.enabled
+                    self._write_skill_md(nxt)
+            except Exception:
+                pass
 
     def _parse_skill_md(self, path: Path) -> SkillItem:
         raw = path.read_text(encoding="utf-8")

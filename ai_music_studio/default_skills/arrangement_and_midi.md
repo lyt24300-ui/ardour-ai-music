@@ -1,24 +1,29 @@
 ---
 name: Аранжировка и написание MIDI-партий
-description: Создание структуры трека, маркеров, ударных, баса, аккордов и мелодий через Ardour MIDI JSON
+description: Создание нешаблонной аранжировки под референсы и голос через sfizz (AVL Drums / Pick Bass), DI-гитары + NAM, Surge XT и гуманизированный MIDI
 category: arrangement
 enabled: true
 builtin: true
 ---
 
-# Скилл: Аранжировка и MIDI-композиция
+# Скилл: Аранжировка и живая MIDI-композиция (без клише!)
 
-1. **Настройка сетки и структуры:**
-   - Выстави темп (`tempo/set_bpm`) и размер (`tempo/set_meter`) по референсу или запросу пользователя.
-   - Создай маркеры секций (`markers/add`): `Intro`, `Verse 1`, `Pre-Chorus`, `Chorus 1`, `Verse 2`, `Chorus 2`, `Bridge`, `Outro` с учётом текста песни.
-2. **Подбор инструментов и обязательная настройка SoundFont (`.sf2`):**
-   - Проверь доступные плагины через `plugin_list_available`, а также `soundfonts` и `fluid_synth_presets` в контексте сессии.
-   - **ВАЖНО:** `ACE Fluid Synth` (`lv2:urn:ardour:a-fluidsynth`) без загруженного `.sf2` файла **молчит**!
-   - Если в `fluid_synth_presets` есть пресет (например `"GeneralUser GS"`), сразу после добавления `ACE Fluid Synth` на трек загрузи пресет и отправь нужную GM-программу через проверенный `lua_run_script` (`plug:preset_by_label("GeneralUser GS")` -> `plug:load_preset(ps)` + `ARDOUR.RawMidiParser()` + `ins:write_immediate_event(...)`).
-   - Если `.sf2` банков и сторонних VSTi нет — сразу предложи карточку `studio_request_plugin_install`, либо по согласованию поставь встроенный `ACE Reasonable Synth` (`lv2:https://community.ardour.org/node/7596`).
-   - Не трать ходы на угадывание несуществующих Lua-методов вроде `region_by_id`, `new_patch_change_command` или `PatchChangePtr`.
-3. **Пакетная генерация музыкальных партий (`midi_note/import_json_*`):**
-   - Пиши гармонически согласованные партии строго в выбранной тональности и ладу (Key/Scale).
-   - Для ударных используй `is_drum_mode: true` (канал 10, стандартная GM-раскладка: Kick=36, Snare=38, Clap=39, Closed Hat=42, Open Hat=46), варьируй `velocity` для живого грува.
-   - Для баса, аккордов и лидов задавай длительность `l` и динамику `velocity`; используй `{ "bar": N, "repeat": M }` для компактного повторения паттернов.
-   - Обязательно включай в аранжировку дополнительные сэмплы из вкладки «Звуки» с помощью `audio/import_file` на нужных тактах.
+1. **Опора на «нейро-паспорт» референса и вокал пользователя:**
+   - Изучи блок `neural_blueprint` у референсов и `unified_vocal_harmony` вокала (или вызови `studio_deep_analyze_reference` / `studio_analyze_vocal_fx`).
+   - Пиши все гармонические инструменты в **единой согласованной тональности**, совместимой с контуром твоего вокала (`F0`), вместо случайных скачков по полутонам.
+   - Повторяй **реальную ритм-сетку** ударных (`drum_pattern`: `kick_steps_16`, `snare_steps_16`, `hat_steps_16`), темп, смену плотности (`verse` -> `chorus`) и тембры инструментов референса.
+   - **ЗАПРЕТ НА ШАБЛОНЫ:** НЕ вставляй по умолчанию «грустное пианино (Lonely Piano)», `alien-monolith-pad` или случайные `808`, если их нет в референсах или запросе!
+
+2. **Живые инструменты вместо «пластикового GM»:**
+   - Выбирай инструмент под реальный жанр через **`studio_inspect_sound_library`** (категории `sfz`, `sf2`, `surge`, `nam`, `all`) и ставь его одним вызовом **`studio_setup_track_instrument`**:
+     - **Живые рок / панк / инди барабаны:** `plugin_type="sfizz"`, `preset_label="AVL Black Pearl 5pc"` (или `"AVL Red Zeppelin 5pc"`). Либо `FluidR3 GM` канал `9` (`midi_channel=9`, программы `16–18` Power Kits). Для электроники — `HS TR-808` / `TR-909`.
+     - **Живой бас с медиатором (панк / пост-панк / рок):** `plugin_type="sfizz"`, `preset_label="Pick Bass"` (или `"Mute Pick Bass"`). Плюс по вкусу в инсерт `BOD_x64` (`TSE BOD`) или `.nam`!
+     - **Живые электрогитары (пост-панк / гранж / инди):** `plugin_type="fluidsynth"`, `preset_label="FS Fender Telecaster DI"`, `program=0` (Standard) / `1` (Muted) / `2` (Muted 5ths & Solo), и **сразу после него на ту же дорожку добавь `NeuralAmpModeler.vst3`** (с `.nam` усилителем!) или `Airwindows Consolidated` + `TAL-Chorus-LX` / `Dragonfly`. Чистый `DI -> NAM` звучит как настоящая гитара через комбик!
+     - **Синтезаторы / ключи / пады:** используй `Surge XT.vst3` (в библиотеке проиндексированы 3,500+ фабричных патчей), `TAL-NoiseMaker.vst3` или `Dexed.vst3` — выбирая конкретный пресет через Lua (`plug:get_info():get_presets(false)` -> `plug:load_preset`), а не дефолтную «пилу».
+
+3. **Живой MIDI-грув (через `studio_compose_humanized_midi`):**
+   - Используй **`studio_compose_humanized_midi`** вместо сухих квантованных нот по линейке:
+     - задавай `role` (`drums`, `bass`, `guitar_strum`, `guitar_arp`, `lead`, `keys`);
+     - для гитарного чёса/аккордов задавай `strum_ms=14..26` (имитация удара медиатором по струнам);
+     - включай `humanize_timing_ms=10..18` и `humanize_velocity=10..16`, прописывай переходы/брейки перед припевом, октавные проходные ноты в басу и динамику куплета vs припева.
+   - Включай дополнительные сэмплы из вкладки «Звуки» на нужных тактах через `ardour__audio_import_file`.

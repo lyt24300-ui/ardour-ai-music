@@ -475,11 +475,152 @@ def test_ten_reconnects_llm_and_mcp() -> None:
         srv.shutdown()
 
 
+def test_neural_audio_and_region_fix() -> None:
+    import asyncio
+    from ai_music_studio import ai_audio_models
+    from ai_music_studio.agent import AIProducerAgent, STUDIO_NATIVE_TOOLS
+    from ai_music_studio.mcp_client import ArdourMCPClient
+    from ai_music_studio.sound_library import inspect_sound_library
+
+    tool_names = {t["function"]["name"] for t in STUDIO_NATIVE_TOOLS}
+    for req_tool in (
+        "studio_deep_analyze_reference",
+        "studio_analyze_vocal_fx",
+        "studio_setup_track_instrument",
+        "studio_compose_humanized_midi",
+    ):
+        assert req_tool in tool_names, f"Missing tool: {req_tool}"
+
+    avail = ai_audio_models.models_available()
+    assert isinstance(avail, dict) and set(avail.keys()) == {"htdemucs", "ast", "clap", "basic_pitch"}
+
+    lib = inspect_sound_library(category="all", limit=20)
+    assert lib["soundfonts_count"] >= 0 and "sfz_instruments_count" in lib and "surge_patches_count" in lib
+
+    # Test Vocal FX Detective, Drum Grid, and Basic Pitch ONNX on synthetic audio
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        voc = tdp / "voc.wav"
+        ref = tdp / "ref.wav"
+        _synth_vocal_wav(voc)
+        _synth_reference_wav(ref, bpm=120.0, dur=8.0)
+
+        from ai_music_studio.audio_analyzer import load_audio_pcm
+        v_st, v_sr = load_audio_pcm(voc, target_sr=44100)
+        vfx = ai_audio_models.analyze_vocal_fx_profile(v_st.T, sr=v_sr, inst_rms_db=-18.0, use_clap=avail["clap"])
+        assert vfx["has_vocal"] is True
+        assert "reverb_type" in vfx and "recommended_ardour_chain" in vfx
+
+        r_st, r_sr = load_audio_pcm(ref, target_sr=44100)
+        dgrid = ai_audio_models.extract_drum_pattern_grid(r_st.T, bpm=120.0, sr=r_sr)
+        assert dgrid["has_drums"] is True
+        assert 0 in dgrid["kick_steps_16"] or len(dgrid["kick_steps_16"]) >= 1
+
+        if avail["basic_pitch"]:
+            bp = ai_audio_models.transcribe_midi_basic_pitch(r_st.mean(axis=1), sr=r_sr)
+            assert bp["note_count"] >= 1
+            assert len(bp["active_pitch_classes"]) >= 1
+
+        if avail["ast"]:
+            ast_res = ai_audio_models.classify_stem_ast(r_st.mean(axis=1), sr=r_sr)
+            assert len(ast_res) >= 1
+
+    # Mock MCP test for whole_file regionId remapping + studio_setup_track_instrument + studio_compose_humanized_midi
+    port = _free_port()
+    seen_calls: list[tuple[str, dict]] = []
+
+    class MockRegionMCP(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
+            method, rid = req.get("method"), req.get("id", 1)
+            if method == "initialize":
+                res = {"serverInfo": {"name": "MockArdour", "version": "9.10"}}
+            elif method == "tools/list":
+                res = {
+                    "tools": [
+                        {"name": "tracks/add", "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string"}}}},
+                        {"name": "tracks/list", "inputSchema": {"type": "object", "properties": {}}},
+                        {"name": "track/get_regions", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}}},
+                        {"name": "audio/import_file", "inputSchema": {"type": "object", "properties": {"trackId": {"type": "string"}, "filePath": {"type": "string"}}}},
+                        {"name": "region/resize_samples", "inputSchema": {"type": "object", "properties": {"regionId": {"type": "string"}, "startSample": {"type": "integer"}, "endSample": {"type": "integer"}}}},
+                        {"name": "plugin/list_available", "inputSchema": {"type": "object", "properties": {"search": {"type": "string"}}}},
+                        {"name": "plugin/add", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "pluginId": {"type": "string"}}}},
+                        {"name": "lua/run_script", "inputSchema": {"type": "object", "properties": {"script": {"type": "string"}}}},
+                        {"name": "session/get_info", "inputSchema": {"type": "object", "properties": {}}},
+                        {"name": "midi_note/import_json", "inputSchema": {"type": "object", "properties": {"trackId": {"type": "string"}, "midi": {"type": "object"}}}},
+                    ]
+                }
+            elif method == "tools/call":
+                tn = req["params"]["name"]
+                ar = req["params"].get("arguments") or {}
+                seen_calls.append((tn, ar))
+                if tn == "audio/import_file":
+                    sc = {"trackId": "311", "regionId": "463", "regionName": "Vocal_1", "positionSample": 1000}
+                elif tn == "track/get_regions":
+                    sc = {"id": "311", "regions": [{"regionId": "999", "name": "Vocal_1", "playlistId": "pl_1", "startSample": 1000}]}
+                elif tn == "region/resize_samples":
+                    assert ar["regionId"] == "999", f"Expected remapped playlist region 999, got {ar['regionId']}"
+                    sc = {"regionId": "999", "resized": True}
+                elif tn == "tracks/add":
+                    sc = {"id": "501", "name": ar.get("name", "MIDI")}
+                elif tn == "plugin/list_available":
+                    sc = {"plugins": [{"pluginId": "lv2:http://sfztools.github.io/sfizz", "name": "sfizz"}]}
+                elif tn == "plugin/add":
+                    sc = {"id": ar["id"], "pluginIndex": 0}
+                elif tn == "session/get_info":
+                    sc = {"tempoBpm": 100.0}
+                else:
+                    sc = {"ok": True}
+                res = {"structuredContent": sc, "content": [{"type": "text", "text": json.dumps(sc)}]}
+            else:
+                res = {}
+            body = json.dumps({"jsonrpc": "2.0", "id": rid, "result": res}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = HTTPServer(("127.0.0.1", port), MockRegionMCP)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            ag = AIProducerAgent(StudioStorage(Path(td)), ArdourMCPClient(f"http://127.0.0.1:{port}/mcp"))
+
+            async def dummy_emit(_ev):
+                return None
+
+            async def run_mock():
+                tools, amap, rsch = await ag._collect_tools()
+                ok1, st1 = await ag._execute_tool("ardour__audio_import_file", {"trackId": "311", "filePath": "x.ogg"}, amap, rsch, [], [], dummy_emit)
+                assert ok1 and st1["regionId"] == "999"
+                ok2, st2 = await ag._execute_tool("ardour__region_resize_samples", {"regionId": "463", "startSample": 1100, "endSample": 5000}, amap, rsch, [], [], dummy_emit)
+                assert ok2 and st2["resized"] is True
+                ok3, st3 = await ag._execute_tool("studio_setup_track_instrument", {"track_name": "Drums", "plugin_type": "sfizz", "preset_label": "AVL Black Pearl 5pc", "midi_channel": 9}, amap, rsch, [], [], dummy_emit)
+                assert ok3 and st3["track_id"] == "501"
+                ok4, st4 = await ag._execute_tool("studio_compose_humanized_midi", {"track_id": "501", "role": "guitar_strum", "length_bars": 2, "notes": [{"bar": 1, "b": 1.0, "n": 40, "l": 1.0}, {"bar": 1, "b": 1.0, "n": 47, "l": 1.0}]}, amap, rsch, [], [], dummy_emit)
+                assert ok4 and st4["imported_notes"] == 2
+
+            asyncio.run(run_mock())
+            midi_calls = [c for c in seen_calls if c[0] == "midi_note/import_json"]
+            assert len(midi_calls) == 1
+            evs = midi_calls[0][1]["midi"]["midi_events"]
+            assert evs[0]["b"] != evs[1]["b"], "Guitar strum stagger should separate identical chord beats"
+    finally:
+        srv.shutdown()
+
+    print(f"[PASS] Neural ONNX ({avail}), Vocal FX Detective, SFZ/SF2/Surge ({lib.get('surge_patches_count', 0)} patches), MIDI Humanize & Region Fix")
+
+
 if __name__ == "__main__":
     test_themes()
     test_audio_dsp_and_alignment()
     test_react_parser()
     test_sound_library_and_mastery_skill()
     test_ten_reconnects_llm_and_mcp()
+    test_neural_audio_and_region_fix()
     test_full_agent_and_api_end_to_end()
-    print("\nALL STAGE 1-6 VERIFICATION TESTS PASSED!")
+    print("\nALL STAGE 1-7 VERIFICATION TESTS PASSED!")

@@ -8229,15 +8229,34 @@ handle_audio_import_file_tool (ARDOUR::Session& session, pt::ptree& root, const 
 		return jsonrpc_error (id, -32603, "Failed to create AudioRegion from imported sources");
 	}
 
+	const std::string created_name = region->name ();
 	playlist->add_region (region, Temporal::timepos_t (pos_sample));
+
+	// Playlist::add_region clones whole_file regions into a new playlist region; return the live playlist regionId.
+	std::shared_ptr<ARDOUR::Region> placed_region = region;
+	if (!placed_region->playlist ()) {
+		const ARDOUR::RegionList& rlist = playlist->region_list_property ().rlist ();
+		for (ARDOUR::RegionList::const_reverse_iterator rit = rlist.rbegin (); rit != rlist.rend (); ++rit) {
+			if (*rit && (*rit)->position_sample () == pos_sample && (*rit)->name ().find (created_name) == 0) {
+				placed_region = *rit;
+				break;
+			}
+		}
+		if (!placed_region->playlist ()) {
+			std::shared_ptr<ARDOUR::Region> at_pos = playlist->top_region_at (Temporal::timepos_t (pos_sample));
+			if (at_pos && at_pos->playlist ()) {
+				placed_region = at_pos;
+			}
+		}
+	}
 
 	std::ostringstream structured;
 	structured << "{\"trackId\":\"" << json_escape (target_track->id ().to_s ()) << "\""
 	           << ",\"trackName\":\"" << json_escape (target_track->name ()) << "\""
-	           << ",\"regionId\":\"" << json_escape (region->id ().to_s ()) << "\""
-	           << ",\"regionName\":\"" << json_escape (region->name ()) << "\""
+	           << ",\"regionId\":\"" << json_escape (placed_region->id ().to_s ()) << "\""
+	           << ",\"regionName\":\"" << json_escape (placed_region->name ()) << "\""
 	           << ",\"positionSample\":" << pos_sample
-	           << ",\"lengthSamples\":" << region->length_samples ()
+	           << ",\"lengthSamples\":" << placed_region->length_samples ()
 	           << ",\"channels\":" << status.sources.size ()
 	           << "}";
 

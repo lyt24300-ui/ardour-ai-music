@@ -894,3 +894,39 @@ def compare_mix_to_reference(mix_path: str | Path, ref_path: str | Path) -> dict
         "stereo_side_ratio_delta": stereo_delta,
         "recommendations": recommendations,
     }
+
+
+def compute_project_vocal_harmony(vocals: list[Any]) -> dict[str, Any]:
+    """Aggregate key candidates & F0 vocal pitch across all vocal clips to lock one unified key."""
+    votes: dict[str, float] = {}
+    notes_low: list[int] = []
+    notes_high: list[int] = []
+    per_clip: list[dict[str, Any]] = []
+
+    for v in vocals:
+        an = getattr(v, "analysis", None) or {}
+        kinfo = an.get("key", {})
+        cands = kinfo.get("top_candidates") or []
+        if not cands and kinfo.get("key"):
+            cands = [{"key": kinfo["key"], "score": float(kinfo.get("confidence", 0.5))}]
+        for idx, cand in enumerate(cands):
+            k = str(cand.get("key", ""))
+            sc = max(0.0, float(cand.get("score", 0.0)))
+            if k and k != "Unknown":
+                # Slight boost for top candidate
+                votes[k] = votes.get(k, 0.0) + sc * (1.2 if idx == 0 else 1.0)
+        pitch = (an.get("vocal") or {}).get("pitch") or {}
+        per_clip.append({
+            "id": getattr(v, "id", ""),
+            "filename": getattr(v, "filename", ""),
+            "solo_key": kinfo.get("key", ""),
+            "pitch_range": f"{pitch.get('range_low_note', '?')}..{pitch.get('range_high_note', '?')}",
+            "median_hz": pitch.get("median_hz"),
+        })
+
+    ranked = sorted(votes.items(), key=lambda x: x[1], reverse=True)
+    return {
+        "unified_key": ranked[0][0] if ranked else "Unknown",
+        "key_candidates": [{"key": k, "score": round(s, 3)} for k, s in ranked[:4]],
+        "clips": per_clip,
+    }

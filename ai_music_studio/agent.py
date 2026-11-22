@@ -6,6 +6,8 @@ import asyncio
 import copy
 import json
 import logging
+import math
+import random
 import re
 import time
 import uuid
@@ -18,6 +20,7 @@ from .audio_analyzer import (
     align_vocal_with_lyrics,
     analyze_audio_file,
     compare_mix_to_reference,
+    compute_project_vocal_harmony,
 )
 from .llm_client import stream_chat_completion
 from .mcp_client import ArdourMCPClient
@@ -96,14 +99,45 @@ STUDIO_NATIVE_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "studio_compare_mix_to_reference",
-            "description": "Compare a bounced mix WAV file against a reference track (by reference asset_id) and get LUFS, spectral band deltas, stereo width comparison, and actionable mixing recommendations.",
+            "description": "Compare a bounced mix WAV file against a reference track (by reference asset_id). Set deep=true to also run HTDemucs + CLAP stem & vocal-FX comparison (vocal level vs backing, vocal reverb tail, tone match, drums/bass balance).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "mix_wav_path": {"type": "string", "description": "Absolute path to exported mix preview WAV."},
                     "reference_asset_id": {"type": "string", "description": "Asset ID of the reference track."},
+                    "deep": {"type": "boolean", "description": "Run stem-level + vocal FX neural comparison (default true)."},
                 },
                 "required": ["mix_wav_path", "reference_asset_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_deep_analyze_reference",
+            "description": "Run local neural audio intelligence (HTDemucs 4-stem split + AST instrument recognition + CLAP timbre/FX tags + Basic Pitch chord/bass/melody MIDI transcription + 16-step drum rhythm extraction + Reference Vocal FX Detective) on a reference asset or audio file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "Asset ID from References/Samples/Vocals."},
+                    "file_path": {"type": "string", "description": "Absolute path to audio file if not using asset_id."},
+                    "offset_sec": {"type": "number", "description": "Optional start second for a custom window (e.g. 45.0)."},
+                    "duration_sec": {"type": "number", "description": "Optional duration for custom window (default 7.8s)."},
+                    "save_stems": {"type": "boolean", "description": "Save separated stem WAVs to exports/stems."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_analyze_vocal_fx",
+            "description": "Analyze uploaded vocal tracks (unified musical key lock across all takes, F0 pitch range, raw compression/EQ/room tail) and compare directly with the reference vocal stem's FX recipe (reverb tail ms, delay lag ms, bandpass/saturation dirt, stereo doubling, SnapTune/EQ/Comp targets).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_reference_comparison": {"type": "boolean", "description": "Include target Vocal FX Blueprint extracted from uploaded references (default true)."},
+                },
             },
         },
     },
@@ -161,14 +195,74 @@ STUDIO_NATIVE_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "studio_inspect_sound_library",
-            "description": "Inspect installed SoundFonts (.sf2), WAV audio samples/loops, and Neural Amp Modeler (.nam) amp captures in the project sound library. Filter by category (e.g. drums, 808, 909, bass, piano, guitar, synth, nam, sf2, all) or search query.",
+            "description": "Inspect installed SoundFonts (.sf2 + internal presets), live SFZ rock/bass kits, Surge XT factory patches (3500+), WAV audio samples/loops, and Neural Amp Modeler (.nam) amp captures. Filter by category (all, sf2, sfz, surge, presets, nam, drums, bass, guitar, keys, synth, pad) or search query.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "category": {"type": "string", "description": "Filter category: all, sf2, nam, drums, 808, 909, bass, guitar, piano, synth, pad, etc."},
-                    "query": {"type": "string", "description": "Optional filename/folder substring filter."},
+                    "category": {"type": "string", "description": "Filter category: all, sf2, sfz, surge, presets, nam, drums, 808, 909, bass, guitar, piano, synth, pad, etc."},
+                    "query": {"type": "string", "description": "Optional filename/preset/patch substring filter."},
                     "limit": {"type": "integer", "minimum": 5, "maximum": 120},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_setup_track_instrument",
+            "description": "Configure a MIDI instrument track in 1 atomic call: optionally creates a MIDI track, inserts sfizz / ACE Fluid Synth / Surge XT / TAL / Dexed, loads an exact LV2/synth preset by label (e.g. 'AVL Black Pearl 5pc', 'Pick Bass', 'FS Fender Telecaster DI', 'FluidR3 GM', 'GeneralUser GS'), sends MIDI channel + Bank/Program Change, and optionally adds a guitar/bass amp plugin (e.g. NeuralAmpModeler or BOD) right after it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "track_id": {"type": "string", "description": "Existing MIDI track ID. Leave empty to create a new MIDI track."},
+                    "track_name": {"type": "string", "description": "Name when creating a new MIDI track (e.g. 'Rock Drums', 'Telecaster Rhythm', 'Pick Bass')."},
+                    "plugin_type": {"type": "string", "enum": ["sfizz", "fluidsynth", "vst3", "lv2"], "description": "Instrument engine to insert."},
+                    "plugin_search": {"type": "string", "description": "Plugin search string if plugin_type is vst3/lv2 (e.g. 'Surge XT', 'TAL-NoiseMaker', 'Dexed')."},
+                    "preset_label": {"type": "string", "description": "Exact preset label to load (e.g. 'AVL Black Pearl 5pc', 'AVL Red Zeppelin 5pc', 'Pick Bass', 'Mute Pick Bass', 'FS Fender Telecaster DI', 'FluidR3 GM', 'GeneralUser GS')."},
+                    "midi_channel": {"type": "integer", "description": "0-based MIDI channel (0..15; use 9 for Channel 10 GM drums). Default 0."},
+                    "bank_msb": {"type": "integer", "description": "MIDI Bank MSB (0..128; for GM drums use midi_channel=9 and bank_msb=0 or 128). Default 0."},
+                    "program": {"type": "integer", "description": "MIDI Program Change (0..127), e.g. 0..3 for Telecaster DI presets, 16..18 for FluidR3 Power Kits on ch 9. Default 0."},
+                    "amp_plugin_search": {"type": "string", "description": "Optional follow-up amp/FX plugin to insert after instrument (e.g. 'NeuralAmpModeler', 'BOD')."},
+                },
+                "required": ["plugin_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "studio_compose_humanized_midi",
+            "description": "Write organic, non-robotic MIDI music into an Ardour MIDI track with micro-timing humanization, dynamic velocity groove, and optional guitar chord strumming stagger (so chords & rhythms never sound stiff/cliche).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "track_id": {"type": "string", "description": "Target Ardour MIDI track ID."},
+                    "name": {"type": "string", "description": "Created MIDI region name (e.g. 'Chorus Guitars', 'Verse Drums')."},
+                    "role": {"type": "string", "enum": ["drums", "bass", "guitar_strum", "guitar_arp", "lead", "keys"], "description": "Musical role controlling humanization & strum curve."},
+                    "start_bar": {"type": "integer", "description": "1-based start bar for the region (default 1)."},
+                    "length_bars": {"type": "integer", "description": "Total length in bars (default 8)."},
+                    "bpm": {"type": "number", "description": "Tempo BPM for converting ms humanization into beat fractions (fetched from session if omitted)."},
+                    "midi_channel": {"type": "integer", "description": "1-based MIDI channel (10 for drums, 1 for melodic instruments)."},
+                    "humanize_timing_ms": {"type": "number", "description": "Random human micro-timing jitter in milliseconds (e.g. 12). Set 0 for strict quantization."},
+                    "humanize_velocity": {"type": "integer", "description": "Random human velocity variation +/- (e.g. 10)."},
+                    "strum_ms": {"type": "number", "description": "Stagger delay in ms between notes occurring on the exact same beat in chords (ideal 14..24ms for guitar_strum)."},
+                    "notes": {
+                        "type": "array",
+                        "description": "List of MIDI note events.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "bar": {"type": "integer", "description": "Absolute 1-based bar >= 1 (e.g. 1, 2, 9...)."},
+                                "b": {"type": "number", "description": "Beat inside bar >= 1.0 (e.g. 1.0, 1.5, 2.25, 3.5)."},
+                                "n": {"type": "integer", "description": "MIDI pitch 0..127 (e.g. Kick=36, Snare=38, ClosedHat=42, Guitar E2=40..84)."},
+                                "l": {"type": "number", "description": "Note duration in beats (e.g. 0.5, 1.0, 2.0)."},
+                                "v": {"type": "integer", "description": "Velocity 1..127 (default 92)."},
+                            },
+                            "required": ["bar", "b", "n", "l"],
+                        },
+                    },
+                },
+                "required": ["track_id", "role", "length_bars", "notes"],
             },
         },
     },
@@ -307,6 +401,7 @@ class AIProducerAgent:
         self.mcp = mcp
         self._cancel_event = asyncio.Event()
         self._running = False
+        self._region_id_alias: dict[str, str] = {}
 
     @property
     def is_running(self) -> bool:
@@ -321,10 +416,30 @@ class AIProducerAgent:
         vocals = self.storage.list_assets("vocals")
         samples = self.storage.list_assets("samples")
         lyrics = self.storage.get_lyrics()
+        vocal_harmony = compute_project_vocal_harmony(vocals) if vocals else {}
 
         def compact_analysis(a: dict[str, Any]) -> dict[str, Any]:
             # Strip dense waveform_peaks array so we don't waste LLM tokens
-            return {k: v for k, v in a.items() if k != "waveform_peaks"}
+            out: dict[str, Any] = {}
+            for k, v in a.items():
+                if k == "waveform_peaks":
+                    continue
+                if k == "neural_blueprint" and isinstance(v, dict):
+                    nb = dict(v)
+                    wins = []
+                    for w in nb.get("windows", [])[:3]:
+                        wc = dict(w)
+                        for mk in ("bass_midi", "chords_and_melody_midi"):
+                            if isinstance(wc.get(mk), dict):
+                                mcopy = dict(wc[mk])
+                                mcopy["notes_sample"] = mcopy.get("notes_sample", [])[:12]
+                                wc[mk] = mcopy
+                        wins.append(wc)
+                    nb["windows"] = wins
+                    out[k] = nb
+                else:
+                    out[k] = v
+            return out
 
         refs_block = [
             {
@@ -372,57 +487,53 @@ class AIProducerAgent:
 
         mode_instruction = (
             "РЕЖИМ: ПОЛНЫЙ АВТОМАТ. Самостоятельно планируй и выполняй весь цикл производства песни "
-            "(анализ -> настройка сессии/темпа/маркеров -> аранжировка/MIDI/сэмплы -> импорт/нарезка/тайминг вокала -> "
-            "сведение/эффекты на треках и мастере -> контрольный экспорт и сравнение с референсом). "
+            "(разбор нейронного паспорта референсов и вокальных FX -> единая тональность/темп/маркеры -> "
+            "подбор живых инструментов sfizz/DI+NAM/Surge -> гуманизированный MIDI без клише -> импорт/нарезка/тайминг вокала -> "
+            "профессиональная цепь обработки голоса под стиль референса -> сведение и нейросверка экспорта со стемами референса). "
             "Останавливайся только если нужно попросить пользователя установить внешний плагин."
             if mode == "autonomous"
             else "РЕЖИМ: ПОШАГОВЫЙ КОНТРОЛЬ. Сначала обнови план через `studio_update_plan`, выполни анализ и "
             "согласуй крупный этап с пользователем перед массовыми изменениями в сессии."
         )
 
-        return f"""Ты — профессиональный AI-музыкальный продюсер, аранжировщик и звукорежиссёр, встроенный напрямую в DAW **Ardour** (AI Music Studio).
+        return f"""Ты — профессиональный AI-музыкальный продюсер, композитор-аранжировщик и звукорежиссёр, встроенный напрямую в DAW **Ardour** (AI Music Studio).
 Отвечай пользователю на языке его запроса (по умолчанию — на русском), чётко, по делу и дружелюбно.
 
 {mode_instruction}
 
-## Главные принципы работы
-1. **Полный контроль над движком Ardour:** все инструменты с префиксом `ardour__` напрямую управляют открытой сессией Ardour (треки, шины, мастер, импорт аудио, разрезка/перемещение/фейды регионов, MIDI JSON, автоматизация, плагины и их параметры, темп, маркеры, рендер, Lua-скрипты).
-2. **Не работай вслепую (Исследование перед применением):**
-   - **Изучай плагины перед настройкой:** добавив или выбрав плагин (`ardour__plugin_list_available`), ВСЕГДА вызывай `ardour__plugin_get_description` (изучи имена параметров, их реальные диапазоны min..max и единицы измерения) и проверяй пресеты/доки через Lua (`plug:get_info():get_presets(false)`, `plug:get_docs()`). Для незнакомых или продвинутых сторонних плагинов (Airwindows Consolidated, Surge XT / Effects, Dexed, Neural Amp Modeler, TDR Nova / Kotelnikov / SlickEQ / Molotok, Dragonfly Reverb, TAL-Reverb/Chorus/NoiseMaker, TSE BOD, LoudMax) используй `studio_web_search` / `studio_fetch_webpage`, чтобы узнать назначение ручек и оптимальные настройки («sweet spots»).
-   - **Экономь шаги — настройку параметров делай пакетом:** после `ardour__plugin_get_description` используй **`studio_set_plugin_parameters`**, чтобы выставить все нужные ручки плагина за **один вызов** вместо десятков одиночных вызовов! Это позволяет успеть полностью написать MIDI/аудио, свести и экспортировать WAV.
-   - **Изучай звуки и инструменты:** просматривай библиотеку через `studio_inspect_sound_library` (SoundFonts `.sf2`, WAV-сэмплы, `.nam` модели усилителей), проверяй референсы и сэмплы через `studio_analyze_audio` (BPM, тональность, LUFS, 7-полосный спектр, транзиенты) и таймкоды вокала (`studio_align_vocal_lyrics`).
-3. **План работы:** в начале сложной задачи всегда вызывай `studio_update_plan`, чтобы пользователь видел живой прогресс.
-4. **Плагины и Web Search:** сначала проверяй реально установленные плагины через `ardour__plugin_list_available`. Если не хватает важного инструмента/эффекта (например, редкого синтезатора или специфической обработки), найди лучший актуальный вариант через `studio_web_search` и отправь карточку через `studio_request_plugin_install` с понятной инструкцией для Windows (папка `BUILD\\lib\\ardour9\\VST3` или `%LOCALAPPDATA%\\Programs\\Common\\VST3`).
-5. **Безопасность:** если Ardour MCP не подключён (`connected: false`), честно сообщи об этом и предложи, что нужно сделать (открыть Ardour / включить MCPHttp), при этом всё равно можешь анализировать аудио, изучать локальную библиотеку звуков и подготовить детальный план продакшна.
+## Главные принципы работы (НИКАКИХ КЛИШЕ!)
+1. **Сначала «услышь» референс и вокал нейросетями:**
+   - У тебя есть локальные нейро-модели (`HTDemucs`, `AST`, `CLAP`, `Basic Pitch`). Проверь блок `neural_blueprint` в референсах и `unified_vocal_harmony`, или вызови **`studio_deep_analyze_reference`** и **`studio_analyze_vocal_fx`**.
+   - **Пиши музыку ПОХОЖУЮ на референсы, а не шаблоны:** бери реальные инструменты (`clap_timbre`, `ast_instruments`), реальную сетку ударных (`drum_pattern.kick_steps_16 / snare_steps_16 / hat_steps_16`), аккордовое движение (`detected_chord_flow` / `chords_and_melody_midi`) и согласуй их с **единой тональностью и диапазоном нот вокала пользователя (`Согласованная тональность вокала`)**.
+   - **Жёсткий запрет на дежурные заглушки:** НИКОГДА не ставь «грустное пианино (Lonely Piano)», `alien-monolith-pad` или случайные `808`, если их нет в тембре референса!
+2. **Выбор живых инструментов и быстрая настройка:**
+   - Изучай библиотеку через **`studio_inspect_sound_library`** (включая `sfz`, `sf2`, `surge`, `nam`, `drums`, `guitar`, `bass`) и ставь инструменты в 1 вызов через **`studio_setup_track_instrument`**:
+     - Рок/панк/инди барабаны -> `plugin_type="sfizz"`, `preset_label="AVL Black Pearl 5pc"` (или `"AVL Red Zeppelin 5pc"`), либо `FluidR3 GM` `midi_channel=9` `program=16..18`.
+     - Живой бас -> `plugin_type="sfizz"`, `preset_label="Pick Bass"` / `"Mute Pick Bass"` (+ при нужде `amp_plugin_search="BOD"`).
+     - Живые гитары -> `plugin_type="fluidsynth"`, `preset_label="FS Fender Telecaster DI"` (`program=0` Clean, `1` Muted, `2` Muted 5ths & Solo), **и сразу следом `amp_plugin_search="NeuralAmpModeler"`**!
+   - Для создания MIDI-партий используй **`studio_compose_humanized_midi`** (с `strum_ms=14..24` для гитарных аккордов, микротаймингом `humanize_timing_ms=10..18`, живым разбросом velocity и брейками на смене секций).
+3. **Понимание и обработка вокала (как в референсе + чисто по паузам):**
+   - Используй рецепт из **`studio_analyze_vocal_fx`** (`reverb_type`, `reverb_tail_ms`, `delay_lag_ms`, `eq_character`, `compression_style`, `stereo_mode`, `tuning_style`, `vocal_to_instrumental_db`).
+   - Вырезай паузы через `ardour__region_split` + `ardour__region_move*` + `ardour__region_set_fades` (`audio_import_file` автоматически возвращает живой `regionId` плейлиста!).
+   - На голос ставь актуальную цепь: **`SnapTune.vst3`** (питч/автотюн в тональность трека) -> **`TDR Nova.vst3`** (HPF, уборка мутности 200-400 Гц, де-эссер или lo-fi bandpass) -> **`TDR Molotok.vst3`** / `Kotelnikov` -> **`Airwindows Consolidated.vst3`** (грязь/лента/перегруз по стилю) -> посылы 100% Wet на **`Dragonfly*Reverb`** / `TAL-Reverb-4`, **`a-delay`**, и **`TAL-Chorus-LX`** при широких даблах.
+4. **Не крути параметры вслепую и проверяй микс со стемами:**
+   - Для любого нового плагина вызови `ardour__plugin_get_description` и выставляй все параметры за 1 шаг через **`studio_set_plugin_parameters`**.
+   - **Обязательная финальная проверка:** после `ardour__session_export_preview` всегда прогоняй экспорт через **`studio_compare_mix_to_reference`** (`deep=true`). Она сравнит **отдельно твой вокал с вокалом референса и твои инструменты с инструментами референса**. Если вокал тихий, слишком сухой или микс молчит — поправь фейдеры/цепи и переэкспортируй!
+5. **Безопасность:** если Ardour MCP не подключён (`connected: false`), честно сообщи об этом и при этом подготовь полный нейронный анализ референсов, вокальных FX и аранжировки.
 
-## Критические правила по инструментам, SoundFont (.sf2) и Ardour Lua
-- **`ACE Fluid Synth` (`lv2:urn:ardour:a-fluidsynth`) НЕ имеет встроенных звуков!** Пока в него не загружен `.sf2` банк (SoundFont), он выдаёт полную тишину.
-- Проверяй `soundfonts` и `fluid_synth_presets` в разделе `Живое состояние Ardour DAW`:
-  - Если в `fluid_synth_presets` есть пресет (например `"GeneralUser GS"`), то **сразу после добавления `ACE Fluid Synth`** на MIDI-трек выполни **ровно один** вызов `ardour__lua_run_script` по этому проверенному шаблону (загружает `.sf2` и при необходимости выбирает GM-инструмент `0..127` на канале 1; для барабанов на 10-м канале Program Change не нужен):
-    ```lua
-    local r = Session:route_by_id(PBD.ID("<TRACK_ID>"))
-    local ins = r:nth_plugin(0):to_plugininsert()
-    local plug = ins:plugin(0)
-    local ps = plug:preset_by_label("GeneralUser GS")
-    if ps and ps.valid then plug:load_preset(ps) end
-    ARDOUR.LuaAPI.usleep(800000)
-    local parser = ARDOUR.RawMidiParser()
-    for _, b in ipairs({{0xB0, 0x00, 0x00, 0xB0, 0x20, 0x00, 0xC0, <PGM_0_127>}}) do
-      if parser:process_byte(b) then
-        ins:write_immediate_event(Evoral.EventType.MIDI_EVENT, parser:buffer_size(), parser:midi_buffer())
-      end
-    end
-    ```
-  - Частые GM-программы (`<PGM_0_127>`): `0`=Acoustic Grand Piano, `25`=Acoustic Steel Guitar, `27`=Clean Electric Guitar, `29`=Overdriven Guitar, `30`=Distortion Guitar, `33`=Electric Bass Finger, `38`=Synth Bass 1, `48`=Strings, `81`=Saw Lead.
-  - Если `soundfonts` и `fluid_synth_presets` **пусты** и сторонних VSTi нет — **НЕ вешай пустой `ACE Fluid Synth`!** Вызови `studio_request_plugin_install` (предложи `.sf2` или бесплатный VST3), либо по согласованию используй `ACE Reasonable Synth` (`lv2:https://community.ardour.org/node/7596`).
-- **Анти-зацикливание по `ardour__lua_run_script`:** НИКОГДА не гадай методы Lua API вслепую! В Ardour Lua **НЕТ** `Session:region_by_id`, `to_midi_track`, `Evoral.PatchChange`, `PatchChangePtr`, `MidiModel:new_patch_change_command`, `plug:get_presets()` (`get_presets` только у `plug:get_info():get_presets(false)`), `ins:load_preset()` (`load_preset` только у `plug = ins:plugin(0)`). Если инструмент ошибся 2 раза — СТОП, не подбирай API дальше.
-- **Обязательная проверка экспорта:** после `ardour__session_export_preview` всегда прогоняй итоговый WAV через `studio_analyze_audio` (`file_path=...`). Если `integrated_lufs < -60` или файл без сигнала — НЕ сдавай тишину, сперва почини синт/пресет/маршрутизацию и переэкспортируй!
+## Критические правила Ardour Lua и пресетов
+- Инструмент `studio_setup_track_instrument` сам грузит пресеты `sfizz` / `ACE Fluid Synth` и отправляет Bank MSB/LSB + Program Change. Если пишешь Lua вручную: никогда не гадай несуществующие методы (`Session:region_by_id`, `to_midi_track`, `Evoral.PatchChange`, `plug:get_presets()`, `ins:load_preset()` — правильно `plug:get_info():get_presets(false)` и `plug:load_preset(ps)`).
 
 ## Активные Скиллы пользователя
 {skills_text}
 
 ## Контекст проекта (из вкладок AI Music Studio)
-### Вкладка «Референсы (Примеры звучания)»
+### Согласованная тональность и вокальная гармония проекта
+```json
+{json.dumps(vocal_harmony, ensure_ascii=False, indent=2)}
+```
+
+### Вкладка «Референсы (Примеры звучания + Нейронный паспорт)»
 ```json
 {json.dumps(refs_block, ensure_ascii=False, indent=2)}
 ```
@@ -479,6 +590,81 @@ class AIProducerAgent:
 
         return tools, ardour_map, raw_schemas
 
+    def _mcp_tool_name(self, ardour_map: dict[str, str], fn_key: str, default: str) -> str:
+        return ardour_map.get(fn_key) or default
+
+    async def _resolve_playlist_region_id(
+        self,
+        ardour_map: dict[str, str],
+        orig_region_id: str,
+        track_id_hint: str = "",
+        region_name_hint: str = "",
+        pos_hint: Optional[int] = None,
+    ) -> Optional[str]:
+        """Resolve an orphaned whole-file regionId to its live cloned playlist regionId."""
+        if not orig_region_id:
+            return None
+        if orig_region_id in self._region_id_alias:
+            return self._region_id_alias[orig_region_id]
+
+        # Inspect orphaned region if hints are missing
+        if not region_name_hint or pos_hint is None:
+            try:
+                g_tool = self._mcp_tool_name(ardour_map, "ardour__region_get_info", "region/get_info")
+                info_res = await self.mcp.call_tool(g_tool, {"regionId": orig_region_id})
+                st = info_res.get("structured", {})
+                if st.get("playlistId"):
+                    self._region_id_alias[orig_region_id] = orig_region_id
+                    return orig_region_id
+                region_name_hint = region_name_hint or str(st.get("name", ""))
+                if pos_hint is None and st.get("startSample") is not None:
+                    pos_hint = int(st["startSample"])
+                track_id_hint = track_id_hint or str(st.get("trackId", ""))
+            except Exception:
+                pass
+
+        t_get = self._mcp_tool_name(ardour_map, "ardour__track_get_regions", "track/get_regions")
+        track_ids: list[str] = [track_id_hint] if track_id_hint else []
+        if not track_ids:
+            try:
+                tl_tool = self._mcp_tool_name(ardour_map, "ardour__tracks_list", "tracks/list")
+                tl_res = await self.mcp.call_tool(tl_tool, {})
+                routes = tl_res.get("structured", {}).get("routes") or tl_res.get("structured", {}).get("tracks") or []
+                track_ids = [str(rt.get("id", "")) for rt in routes if rt.get("id")]
+            except Exception:
+                pass
+
+        best_id: Optional[str] = None
+        best_score = -10**12
+        for tid in track_ids:
+            try:
+                r_res = await self.mcp.call_tool(t_get, {"id": tid})
+                regs = r_res.get("structured", {}).get("regions") or []
+            except Exception:
+                continue
+            for reg in regs:
+                if not reg.get("playlistId"):
+                    continue
+                rid = str(reg.get("regionId", ""))
+                if not rid:
+                    continue
+                rname = str(reg.get("name", ""))
+                rpos = int(reg.get("startSample", 0) or 0)
+                score = 0
+                if region_name_hint and rname == region_name_hint:
+                    score += 1000
+                elif region_name_hint and (rname.startswith(region_name_hint) or region_name_hint.startswith(rname)):
+                    score += 500
+                if pos_hint is not None:
+                    score -= abs(rpos - pos_hint) // 100
+                if score > best_score:
+                    best_score = score
+                    best_id = rid
+        if best_id and (region_name_hint or pos_hint is not None):
+            self._region_id_alias[orig_region_id] = best_id
+            return best_id
+        return None
+
     async def _execute_tool(
         self,
         fn_name: str,
@@ -511,11 +697,61 @@ class AIProducerAgent:
                 return False, {"error": f"Audio file not found: {file_path}"}
             analysis = await asyncio.to_thread(analyze_audio_file, file_path, category)
             if asset:
+                existing_nb = (asset.analysis or {}).get("neural_blueprint")
+                if existing_nb:
+                    analysis["neural_blueprint"] = existing_nb
                 asset.analysis = analysis
                 self.storage.update_asset(asset)
                 await emit({"type": "assets_updated"})
             compact = {k: v for k, v in analysis.items() if k != "waveform_peaks"}
             return True, compact
+
+        if fn_name == "studio_deep_analyze_reference":
+            from .ai_audio_models import deep_analyze_reference
+
+            asset_id = args.get("asset_id")
+            file_path = args.get("file_path")
+            asset = self.storage.get_asset(asset_id) if asset_id else None
+            if asset:
+                file_path = asset.stored_path
+            if not file_path or not Path(file_path).exists():
+                return False, {"error": f"Audio file not found: {file_path}"}
+            offset_sec = args.get("offset_sec")
+            duration_sec = float(args.get("duration_sec", 7.8) or 7.8)
+            save_stems_dir = None
+            if args.get("save_stems"):
+                save_stems_dir = self.storage.data_dir / "exports" / "stems" / Path(file_path).stem
+            bpm_hint = (asset.analysis or {}).get("tempo", {}).get("bpm") if asset else None
+            sections = (asset.analysis or {}).get("sections") if asset else None
+
+            await emit({"type": "status", "text": f"Запускаю нейроразбор {Path(file_path).name} (HTDemucs + AST + CLAP + Basic Pitch)..."})
+            bp = await asyncio.to_thread(
+                deep_analyze_reference,
+                file_path,
+                bpm_hint,
+                sections,
+                save_stems_dir,
+                float(offset_sec) if offset_sec is not None else None,
+                duration_sec,
+            )
+            if asset and offset_sec is None and not bp.get("error"):
+                an = dict(asset.analysis or {})
+                an["neural_blueprint"] = bp
+                asset.analysis = an
+                self.storage.update_asset(asset)
+                await emit({"type": "assets_updated"})
+            return "error" not in bp, bp
+
+        if fn_name == "studio_analyze_vocal_fx":
+            from .ai_audio_models import analyze_project_vocals_and_harmony
+
+            vocals = self.storage.list_assets("vocals")
+            refs = self.storage.list_assets("references") if args.get("include_reference_comparison", True) else []
+            if not vocals and not refs:
+                return False, {"error": "No vocals or references uploaded yet."}
+            await emit({"type": "status", "text": "Анализирую вокальные эффекты, питч-контур и гармонию проекта..."})
+            res = await asyncio.to_thread(analyze_project_vocals_and_harmony, vocals, refs)
+            return True, res
 
         if fn_name == "studio_align_vocal_lyrics":
             vocal_id = args.get("vocal_asset_id", "")
@@ -559,7 +795,13 @@ class AIProducerAgent:
                 return False, {"error": f"Reference asset '{ref_id}' not found."}
             if not mix_path or not Path(mix_path).exists():
                 return False, {"error": f"Mix WAV not found: {mix_path}"}
-            report = await asyncio.to_thread(compare_mix_to_reference, mix_path, ref.stored_path)
+            use_deep = bool(args.get("deep", True))
+            if use_deep:
+                from .ai_audio_models import compare_mix_neural
+                await emit({"type": "status", "text": "Разделяю экспорт на стемы и сверяю вокал/инструменты с референсом..."})
+                report = await asyncio.to_thread(compare_mix_neural, mix_path, ref.stored_path)
+            else:
+                report = await asyncio.to_thread(compare_mix_to_reference, mix_path, ref.stored_path)
             return True, report
 
         if fn_name == "studio_web_search":
@@ -582,6 +824,232 @@ class AIProducerAgent:
                 limit=int(args.get("limit", 40) or 40),
             )
             return True, res
+
+        if fn_name == "studio_setup_track_instrument":
+            try:
+                ptype = str(args.get("plugin_type", "sfizz")).lower().strip()
+                track_id = str(args.get("track_id", "")).strip()
+                track_name = str(args.get("track_name") or args.get("preset_label") or "Instrument").strip()
+                preset_label = str(args.get("preset_label", "")).strip()
+                plugin_search = str(args.get("plugin_search", "")).strip()
+                midi_ch = max(0, min(15, int(args.get("midi_channel", 0) or 0)))
+                bank_msb = int(args.get("bank_msb", 0) or 0)
+                program = max(0, min(127, int(args.get("program", 0) or 0)))
+                amp_search = str(args.get("amp_plugin_search", "")).strip()
+
+                t_add_tool = self._mcp_tool_name(ardour_map, "ardour__tracks_add", "tracks/add")
+                p_list_tool = self._mcp_tool_name(ardour_map, "ardour__plugin_list_available", "plugin/list_available")
+                p_add_tool = self._mcp_tool_name(ardour_map, "ardour__plugin_add_by_plugin_id", self._mcp_tool_name(ardour_map, "ardour__plugin_add", "plugin/add"))
+                lua_tool = self._mcp_tool_name(ardour_map, "ardour__lua_run_script", "lua/run_script")
+
+                # 1. Create MIDI track if track_id not specified
+                if not track_id:
+                    tr_res = await self.mcp.call_tool(
+                        t_add_tool,
+                        {"name": track_name, "type": "midi", "count": 1, "inputChannels": 0, "outputChannels": 2, "insert": "end"},
+                    )
+                    st = tr_res.get("structured", {})
+                    track_id = str(
+                        st.get("id")
+                        or (st.get("tracks") or [{}])[0].get("id")
+                        or (st.get("routes") or [{}])[0].get("id")
+                        or st.get("track", {}).get("id")
+                        or ""
+                    )
+                    if not track_id:
+                        tl_res = await self.mcp.call_tool(self._mcp_tool_name(ardour_map, "ardour__tracks_list", "tracks/list"), {})
+                        for rt in reversed(tl_res.get("structured", {}).get("routes") or []):
+                            if str(rt.get("name", "")).startswith(track_name):
+                                track_id = str(rt.get("id", ""))
+                                break
+                    if not track_id:
+                        return False, {"error": f"Failed to resolve created MIDI track ID from response: {st}"}
+
+                # 2. Lookup exact pluginId
+                search_term = plugin_search
+                if ptype == "sfizz":
+                    search_term = search_term or "sfizz"
+                elif ptype == "fluidsynth":
+                    search_term = search_term or "a-fluidsynth"
+                pl_res = await self.mcp.call_tool(p_list_tool, {"search": search_term, "includeHidden": False, "includeInternal": False})
+                candidates = pl_res.get("structured", {}).get("plugins") or []
+                chosen = None
+                for c in candidates:
+                    pid = str(c.get("pluginId", ""))
+                    if ptype == "sfizz" and "sfizz" in pid.lower() and "multi" not in pid.lower():
+                        chosen = pid
+                        break
+                    if ptype == "fluidsynth" and "a-fluidsynth" in pid.lower():
+                        chosen = pid
+                        break
+                if not chosen and candidates:
+                    chosen = str(candidates[0].get("pluginId", ""))
+                if not chosen:
+                    return False, {"error": f"Plugin not found for type={ptype}, search={search_term}"}
+
+                # 3. Insert instrument plugin
+                add_res = await self.mcp.call_tool(p_add_tool, {"id": track_id, "pluginId": chosen, "enabled": True})
+                add_st = add_res.get("structured", {})
+                p_idx = int(add_st.get("pluginIndex", 0))
+
+                # 4. Load LV2/plugin preset + send Bank/Program Change via verified Lua
+                cc0 = 0 if (midi_ch == 9 and bank_msb == 128) else max(0, min(127, bank_msb))
+                status_cc = 0xB0 + midi_ch
+                status_pc = 0xC0 + midi_ch
+                preset_esc = preset_label.replace("\\", "\\\\").replace('"', '\\"')
+                tid_esc = track_id.replace('"', '\\"')
+                lua_lines = [
+                    f'local r = Session:route_by_id(PBD.ID("{tid_esc}"))',
+                    f'local ins = r:nth_plugin({p_idx}):to_plugininsert()',
+                    'local plug = ins:plugin(0)',
+                ]
+                if preset_label:
+                    lua_lines.extend([
+                        f'local ps = plug:preset_by_label("{preset_esc}")',
+                        'if ps and ps.valid then plug:load_preset(ps) end',
+                        'ARDOUR.LuaAPI.usleep(600000)',
+                    ])
+                if ptype == "fluidsynth" or program > 0 or bank_msb > 0 or midi_ch > 0:
+                    lua_lines.extend([
+                        'local parser = ARDOUR.RawMidiParser()',
+                        f'for _, b in ipairs({{{status_cc}, 0x00, {cc0}, {status_cc}, 0x20, 0x00, {status_pc}, {program}}}) do',
+                        '  if parser:process_byte(b) then',
+                        '    ins:write_immediate_event(Evoral.EventType.MIDI_EVENT, parser:buffer_size(), parser:midi_buffer())',
+                        '  end',
+                        'end',
+                    ])
+                await self.mcp.call_tool(lua_tool, {"script": "\n".join(lua_lines)})
+
+                # 5. Optional amp/FX follow-up plugin (e.g. NeuralAmpModeler after Fender Telecaster DI)
+                amp_info = None
+                if amp_search:
+                    ap_res = await self.mcp.call_tool(p_list_tool, {"search": amp_search, "includeHidden": False, "includeInternal": False})
+                    acands = ap_res.get("structured", {}).get("plugins") or []
+                    if acands:
+                        amp_pid = str(acands[0].get("pluginId", ""))
+                        a_add = await self.mcp.call_tool(p_add_tool, {"id": track_id, "pluginId": amp_pid, "enabled": True})
+                        amp_info = {"pluginId": amp_pid, "pluginIndex": a_add.get("structured", {}).get("pluginIndex")}
+
+                return True, {
+                    "track_id": track_id,
+                    "track_name": track_name,
+                    "plugin_id": chosen,
+                    "plugin_index": p_idx,
+                    "preset_label": preset_label,
+                    "midi_channel_0_based": midi_ch,
+                    "bank_msb": cc0,
+                    "program": program,
+                    "amp_plugin": amp_info,
+                }
+            except Exception as exc:
+                return False, {"error": str(exc)}
+
+        if fn_name == "studio_compose_humanized_midi":
+            try:
+                track_id = str(args.get("track_id", "")).strip()
+                if not track_id:
+                    return False, {"error": "Provide track_id."}
+                role = str(args.get("role", "guitar_strum")).strip().lower()
+                region_name = str(args.get("name") or f"Part_{role}").strip()
+                start_bar = max(1, int(args.get("start_bar", 1) or 1))
+                length_bars = max(1, int(args.get("length_bars", 8) or 8))
+                raw_notes = args.get("notes") or []
+                if not raw_notes:
+                    return False, {"error": "notes array is empty."}
+
+                bpm = float(args.get("bpm") or 0.0)
+                if bpm <= 10:
+                    try:
+                        s_info = await self.mcp.call_tool(self._mcp_tool_name(ardour_map, "ardour__session_get_info", "session/get_info"), {})
+                        bpm = float(s_info.get("structured", {}).get("tempoBpm") or 120.0)
+                    except Exception:
+                        bpm = 120.0
+
+                is_drum = role == "drums"
+                midi_ch = int(args.get("midi_channel") or (10 if is_drum else 1))
+                timing_ms = float(args.get("humanize_timing_ms", 12.0 if not is_drum else 9.0) or 0.0)
+                vel_jit = int(args.get("humanize_velocity", 10) or 0)
+                strum_ms = float(args.get("strum_ms", 16.0 if role == "guitar_strum" else 0.0) or 0.0)
+
+                beats_per_bar = 4.0
+                ms_to_beats = bpm / 60000.0
+                rng = random.Random(42)
+
+                # Group notes happening on same (bar, rounded beat) for chord strumming stagger
+                normalized_input: list[dict[str, Any]] = []
+                for idx, ev in enumerate(raw_notes):
+                    if not isinstance(ev, dict) or "n" not in ev:
+                        continue
+                    bar = max(1, int(ev.get("bar", start_bar)))
+                    beat = float(ev.get("b", 1.0))
+                    pitch = max(0, min(127, int(ev.get("n"))))
+                    dur = max(0.05 if not is_drum else 0.25, float(ev.get("l", 0.5)))
+                    vel = max(1, min(127, int(ev.get("v", 92))))
+                    normalized_input.append({"bar": bar, "b": beat, "n": pitch, "l": dur, "v": vel, "idx": idx})
+
+                strum_groups: dict[tuple[int, int], list[dict[str, Any]]] = {}
+                for ev in normalized_input:
+                    key = (ev["bar"], int(round(ev["b"] * 100)))
+                    strum_groups.setdefault(key, []).append(ev)
+
+                events_out: list[dict[str, Any]] = []
+                for key, grp in strum_groups.items():
+                    grp.sort(key=lambda x: x["n"])
+                    for order_i, ev in enumerate(grp):
+                        delta_ms = 0.0
+                        if strum_ms > 0 and len(grp) > 1 and not is_drum:
+                            delta_ms += order_i * strum_ms
+                        if timing_ms > 0:
+                            delta_ms += rng.uniform(-timing_ms, timing_ms)
+
+                        # Keep notes anchored strictly at or after bar 1, beat 1.0
+                        abs_beat = (ev["bar"] - 1) * beats_per_bar + (ev["b"] - 1.0) + (delta_ms * ms_to_beats)
+                        abs_beat = max((start_bar - 1) * beats_per_bar, abs_beat)
+                        new_bar = int(math.floor(abs_beat / beats_per_bar)) + 1
+                        new_b = round((abs_beat - (new_bar - 1) * beats_per_bar) + 1.0, 4)
+
+                        # Beat groove accent: slight boost on beats 1 & 3, subtle dip on syncopations
+                        groove_boost = 4 if abs((new_b - 1.0) - round(new_b - 1.0)) < 0.08 and int(round(new_b)) in (1, 3) else -3
+                        new_vel = ev["v"] + groove_boost + (rng.randint(-vel_jit, vel_jit) if vel_jit > 0 else 0)
+                        new_vel = max(20, min(127, new_vel))
+
+                        events_out.append({
+                            "bar": new_bar,
+                            "b": max(1.0, new_b),
+                            "n": ev["n"],
+                            "l": round(ev["l"], 4),
+                            "v": new_vel,
+                        })
+
+                events_out.sort(key=lambda x: (x["bar"], x["b"], x["n"]))
+                max_ev_bar = max((e["bar"] for e in events_out), default=start_bar)
+                end_bar = max(start_bar + length_bars, max_ev_bar + 1)
+
+                m_tool = self._mcp_tool_name(
+                    ardour_map,
+                    "ardour__midi_note_import_json_to_new_region_bbt",
+                    self._mcp_tool_name(ardour_map, "ardour__midi_note_import_json", "midi_note/import_json"),
+                )
+                payload = {
+                    "trackId": track_id,
+                    "name": region_name,
+                    "startBar": start_bar,
+                    "startBeat": 1.0,
+                    "endBar": end_bar,
+                    "endBeat": 1.0,
+                    "midi": {
+                        "is_drum_mode": is_drum,
+                        "channel": midi_ch,
+                        "ticks_per_quarter": 480,
+                        "time_signature": "4/4",
+                        "midi_events": events_out,
+                    },
+                }
+                res = await self.mcp.call_tool(m_tool, payload)
+                st = res.get("structured", res)
+                return True, {"imported_notes": len(events_out), "bpm_used": bpm, "role": role, "ardour_result": st}
+            except Exception as exc:
+                return False, {"error": str(exc)}
 
         if fn_name == "studio_set_plugin_parameters":
             route_id = str(args.get("route_id", "")).strip()
@@ -641,11 +1109,42 @@ class AIProducerAgent:
         if fn_name in ardour_map:
             mcp_name = ardour_map[fn_name]
             coerced = _coerce_args_to_schema(args, raw_schemas.get(fn_name))
+            # Remap known orphaned whole_file regionIds before dispatching region/* calls
+            if "regionId" in coerced and str(coerced["regionId"]) in self._region_id_alias:
+                coerced["regionId"] = self._region_id_alias[str(coerced["regionId"])]
             try:
                 res = await self.mcp.call_tool(mcp_name, coerced)
-                return True, res.get("structured", res)
+                st = res.get("structured", res)
+                # Fix whole_file clone mismatch immediately after audio/import_file
+                if (mcp_name == "audio/import_file" or "audio_import" in fn_name) and isinstance(st, dict) and st.get("regionId"):
+                    orig_rid = str(st["regionId"])
+                    real_rid = await self._resolve_playlist_region_id(
+                        ardour_map,
+                        orig_rid,
+                        track_id_hint=str(st.get("trackId", "")),
+                        region_name_hint=str(st.get("regionName", "")),
+                        pos_hint=int(st["positionSample"]) if st.get("positionSample") is not None else None,
+                    )
+                    if real_rid and real_rid != orig_rid:
+                        st = dict(st)
+                        st["regionId"] = real_rid
+                        st["resolvedFromWholeFileId"] = orig_rid
+                return True, st
             except Exception as exc:
-                return False, {"error": str(exc)}
+                err_txt = str(exc)
+                # Auto-recover older unmapped regionId throwing "Region has no playlist"
+                if "Region has no playlist" in err_txt and coerced.get("regionId"):
+                    orig_rid = str(coerced["regionId"])
+                    real_rid = await self._resolve_playlist_region_id(ardour_map, orig_rid)
+                    if real_rid and real_rid != orig_rid:
+                        coerced_retry = dict(coerced)
+                        coerced_retry["regionId"] = real_rid
+                        try:
+                            res2 = await self.mcp.call_tool(mcp_name, coerced_retry)
+                            return True, res2.get("structured", res2)
+                        except Exception as exc2:
+                            return False, {"error": str(exc2)}
+                return False, {"error": err_txt}
 
         return False, {"error": f"Unknown tool: {fn_name}"}
 
@@ -703,6 +1202,51 @@ class AIProducerAgent:
                     await emit({"type": "status", "text": status_text})
 
                 self.mcp.set_runtime_hooks(on_status=on_status_cb, cancel_event=self._cancel_event)
+
+                # Ensure real uploaded references (>=7s) have neural blueprint + vocal FX profile cached
+                try:
+                    from .ai_audio_models import deep_analyze_reference, models_available
+
+                    if models_available().get("htdemucs"):
+                        refs_now = self.storage.list_assets("references")
+                        bp_cache_by_sig: dict[tuple[str, int], dict[str, Any]] = {}
+                        for r in refs_now:
+                            sig_k = (r.filename, int(r.size_bytes or 0))
+                            if isinstance(r.analysis, dict) and r.analysis.get("neural_blueprint"):
+                                bp_cache_by_sig[sig_k] = r.analysis["neural_blueprint"]
+                        for r in refs_now:
+                            if self._cancel_event.is_set():
+                                break
+                            an = dict(r.analysis or {})
+                            dur_s = float(an.get("duration_sec", 0.0) or 0.0)
+                            if an.get("neural_blueprint") or dur_s < 7.0:
+                                continue
+                            if not r.stored_path or not Path(r.stored_path).exists():
+                                continue
+                            sig_k = (r.filename, int(r.size_bytes or 0))
+                            if sig_k in bp_cache_by_sig:
+                                an["neural_blueprint"] = bp_cache_by_sig[sig_k]
+                                r.analysis = an
+                                self.storage.update_asset(r)
+                                continue
+                            await emit({
+                                "type": "status",
+                                "text": f"Слушаю референс нейросетями (HTDemucs + AST + CLAP + Basic Pitch): {r.filename}...",
+                            })
+                            bp = await asyncio.to_thread(
+                                deep_analyze_reference,
+                                r.stored_path,
+                                (an.get("tempo") or {}).get("bpm"),
+                                an.get("sections"),
+                            )
+                            if bp and not bp.get("error"):
+                                bp_cache_by_sig[sig_k] = bp
+                                an["neural_blueprint"] = bp
+                                r.analysis = an
+                                self.storage.update_asset(r)
+                                await emit({"type": "assets_updated"})
+                except Exception as neural_exc:
+                    _LOGGER.warning("Auto neural reference enrichment skipped: %s", neural_exc)
 
                 await emit({"type": "status", "text": "Подключаюсь к движку Ardour и собираю контекст..."})
                 session_ctx = await self.mcp.get_session_snapshot_context()

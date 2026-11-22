@@ -334,11 +334,30 @@ async def api_patch_asset(asset_id: str, patch: AssetMetaPatch) -> dict[str, Any
 
 
 @app.post("/api/assets/{asset_id}/analyze")
-async def api_reanalyze_asset(asset_id: str) -> dict[str, Any]:
+async def api_reanalyze_asset(asset_id: str, deep: bool = False) -> dict[str, Any]:
     asset = storage.get_asset(asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     analysis = await asyncio.to_thread(analyze_audio_file, asset.stored_path, asset.category)
+    if deep:
+        try:
+            from .ai_audio_models import analyze_vocal_fx_profile, deep_analyze_reference
+            from .audio_analyzer import load_audio_pcm
+
+            if asset.category == "references":
+                analysis["neural_blueprint"] = await asyncio.to_thread(
+                    deep_analyze_reference,
+                    asset.stored_path,
+                    analysis.get("tempo", {}).get("bpm"),
+                    analysis.get("sections"),
+                )
+            elif asset.category == "vocals":
+                st, sr = await asyncio.to_thread(load_audio_pcm, asset.stored_path, 44100, 60.0)
+                analysis["vocal_fx_profile"] = await asyncio.to_thread(
+                    analyze_vocal_fx_profile, st.T, sr, None, True
+                )
+        except Exception as exc:
+            analysis["neural_error"] = str(exc)
     asset.analysis = analysis
     storage.update_asset(asset)
     return asset.model_dump()

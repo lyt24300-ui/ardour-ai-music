@@ -63,8 +63,8 @@ def _discover_soundfonts() -> list[str]:
     return found
 
 
-def _discover_fluidsynth_presets() -> list[str]:
-    """Locate LV2 preset labels registered for urn:ardour:a-fluidsynth."""
+def _discover_plugin_presets(plugin_uri_substr: str) -> list[str]:
+    """Locate LV2 preset labels matching a plugin URI in bundled/user LV2 dirs."""
     lv2_dirs: list[Path] = [
         WORKSPACE_ROOT / "lib" / "ardour9" / "LV2",
         Path.home() / ".lv2",
@@ -84,13 +84,23 @@ def _discover_fluidsynth_presets() -> list[str]:
                 txt = ttl.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            if "urn:ardour:a-fluidsynth" in txt and "pset:Preset" in txt:
+            if plugin_uri_substr in txt and "pset:Preset" in txt:
                 for m in label_re.finditer(txt):
                     lbl = m.group(1).strip()
                     if lbl and lbl not in seen:
                         seen.add(lbl)
                         labels.append(lbl)
     return labels
+
+
+def _discover_fluidsynth_presets() -> list[str]:
+    """Locate LV2 preset labels registered for urn:ardour:a-fluidsynth."""
+    return _discover_plugin_presets("urn:ardour:a-fluidsynth")
+
+
+def _discover_sfizz_presets() -> list[str]:
+    """Locate LV2 preset labels registered for http://sfztools.github.io/sfizz."""
+    return _discover_plugin_presets("http://sfztools.github.io/sfizz")
 
 
 class ArdourMCPClient:
@@ -300,10 +310,18 @@ class ArdourMCPClient:
     async def get_session_snapshot_context(self) -> dict[str, Any]:
         """Gather compact live session state (info, tracks, markers, available plugins)."""
         try:
+            from .ai_audio_models import models_available
+            ai_models = models_available()
+        except Exception:
+            ai_models = {}
+
+        try:
             from .sound_library import inspect_sound_library
             lib = inspect_sound_library(category="all", limit=15)
             library_summary: dict[str, Any] = {
                 "soundfonts_count": lib.get("soundfonts_count", 0),
+                "sfz_instruments_count": lib.get("sfz_instruments_count", 0),
+                "surge_patches_count": lib.get("surge_patches_count", 0),
                 "nam_models_count": lib.get("nam_models_count", 0),
                 "total_audio_samples": lib.get("total_audio_samples", 0),
                 "top_sample_categories": dict(list(lib.get("category_counts", {}).items())[:15]),
@@ -314,8 +332,10 @@ class ArdourMCPClient:
 
         ctx: dict[str, Any] = {
             "connected": False,
+            "ai_models_available": ai_models,
             "soundfonts": _discover_soundfonts(),
             "fluid_synth_presets": _discover_fluidsynth_presets(),
+            "sfizz_presets": _discover_sfizz_presets(),
             "sound_library_summary": library_summary,
         }
         try:
